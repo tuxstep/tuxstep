@@ -1,0 +1,178 @@
+# Apple open-source components that TuxSTEP integrates from
+# github.com/apple-oss-distributions and friends.
+#
+# This file is a *registry only* — no build harness yet. Future PRs will add:
+#   ci/build/fetch-apple-sources.sh   — clone each entry at the pinned tag
+#   ci/build/apply-patches.sh         — apply ci/patches/<name>/*.patch in order
+#   ci/build/build-all.sh             — dispatch to ci/build/sources/<name>.sh
+#
+# Tags are pinned conservatively. Refresh every ~6 months.
+# Where a tag is `TBD` we still need to pick one — see comments.
+
+sources:
+
+  # =========================================================================
+  # PHASE 1 — Apple OSS userland (no init replacement yet)
+  # =========================================================================
+
+  cctools:
+    repo: https://github.com/tpoechtrager/cctools-port.git
+    tag: '973.0.1'
+    install_to: /System/Library/Tools/
+    binaries: [otool, lipo, install_name_tool, nm, strip, ar, ranlib]
+    notes: >
+      Mach-O binary toolchain. tpoechtrager's port already builds cleanly on
+      Linux — picked as the warm-up port for the build harness because it's
+      the lowest-risk way to validate fetch/patch/build/install end-to-end.
+
+  system_cmds:
+    repo: https://github.com/apple-oss-distributions/system_cmds.git
+    tag: system_cmds-960.0.16
+    install_to: /System/Library/Tools/
+    only: [pwd_mkdb, getty, vipw, vifs, getconf]
+    notes: >
+      Skipping Apple's `sysctl` — its BSD MIB doesn't map cleanly to Linux's
+      /proc/sys interface. pwd_mkdb is the one we actually need (dshelper
+      consumes it). getty is useful for serial-console plists later.
+
+  network_cmds:
+    repo: https://github.com/apple-oss-distributions/network_cmds.git
+    tag: network_cmds-621
+    install_to: /System/Library/Tools/
+    only: [ifconfig, route, netstat, arp, ndp]
+    notes: >
+      FreeBSD-flavored network UX. Linux equivalents (ip, ss) stay reachable
+      via /usr/bin in the four-domain PATH, so this is additive, not
+      replacing.
+
+  file_cmds:
+    repo: https://github.com/apple-oss-distributions/file_cmds.git
+    tag: TBD                           # latest stable file_cmds-* tag
+    install_to: /System/Library/Tools/
+    only: [xattr]
+    notes: >
+      Just xattr for macOS-script compat. coreutils handles cp/mv/rm/etc.,
+      so we explicitly do NOT pull the rest of file_cmds.
+
+  # =========================================================================
+  # PHASE 2 — Init replacement (the project's actual differentiator)
+  # =========================================================================
+
+  launchd:
+    repo: https://github.com/apple-oss-distributions/launchd.git
+    tag: launchd-842.92.1
+    install_to: /sbin/init             # PID 1
+    also_installs:
+      launchctl: /System/Library/Tools/launchctl
+    notes: >
+      Real Apple launchd. Mach-bootstrap subsystem is dead code on Linux —
+      a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
+      and socket activation are all straight POSIX.
+
+      Fallback: relaunchd (https://github.com/jmgao/relaunchd) — a clean-
+      room reimplementation, ~10x smaller, drops in if the real launchd
+      port stalls. Decide between them after the first week of porting
+      effort.
+
+  # =========================================================================
+  # OPTIONAL — only if there's a concrete reason to take it
+  # =========================================================================
+
+  openssh:
+    repo: https://github.com/apple-oss-distributions/OpenSSH.git
+    tag: TBD                           # latest OpenSSH-* tag
+    install_to: /usr/sbin/             # FHS — not /System/Library/Tools
+    optional: true
+    notes: >
+      Apple's openssh fork. Default plan: skip — Devuan's stock openssh
+      works fine. Only pull this if/when we want parity with macOS-flavor
+      sshd_config knobs (e.g. ChallengeResponseAuthentication semantics)
+      or Apple's specific PAM integration.
+
+# =========================================================================
+# Explicitly NOT integrated
+# =========================================================================
+# These show up in apple-oss-distributions but are deliberately out of scope.
+# Listed here so future contributors see the rationale and don't reopen the
+# question casually.
+
+not_integrated:
+
+  Foundation:
+    reason: Apple's Foundation is not open source.
+    use_instead: GNUstep libs-base (Gershwin already builds it)
+
+  CoreFoundation:
+    reason: >
+      Apple's CF is bound to Mach IPC and CFRunLoop semantics that don't map
+      to Linux. The open swift-corelibs-foundation is OK but we can use
+      libs-corebase from Gershwin for the same surface area.
+    use_instead: libs-corebase (Gershwin)
+
+  Libsystem:
+    reason: Wraps Mach traps. Glibc covers the same job on Linux.
+    use_instead: glibc
+
+  libdispatch:
+    reason: >
+      A clean Linux fork already exists and is well-maintained.
+    use_instead: libdispatch.dev (https://github.com/apple/swift-corelibs-libdispatch)
+
+  OpenDirectory:
+    reason: >
+      Architecturally tied to Apple's DirectoryService daemon. Gershwin's
+      dshelper is the right substrate on Linux.
+    use_instead: Gershwin dshelper
+
+  IOKit:
+    reason: Mach + xnu coupling; no Linux equivalent. Userspace probes /sys.
+    use_instead: udev / sysfs
+
+  configd:
+    reason: SystemConfiguration framework is a Mach-based config service.
+    use_instead: NetworkManager / ifupdown (Devuan default)
+
+  mDNSResponder:
+    reason: Apple's daemon is Mach-coupled and bigger than necessary.
+    use_instead: avahi-daemon
+
+  shell_cmds:
+    reason: GNU coreutils + util-linux are sufficient and well-maintained.
+    use_instead: coreutils + util-linux (Devuan default)
+
+  text_cmds:
+    reason: GNU coreutils covers head/tail/cut/etc.
+    use_instead: coreutils (Devuan default)
+
+  file_cmds_other:
+    reason: >
+      Aside from xattr (above), the rest of file_cmds duplicates coreutils.
+    use_instead: coreutils (Devuan default)
+
+  Security:
+    reason: >
+      Tightly coupled to Mach + Apple's Keychain Services. The pieces we'd
+      want (CommonCrypto-equivalents) are already in OpenSSL/libsodium.
+    use_instead: OpenSSL / libsodium
+
+  objc4:
+    reason: >
+      Apple's Objective-C runtime. Only relevant if we ever want unmodified
+      Mac binary compatibility — that's the corner-2 port from the design
+      doc, not the TuxSTEP v1 mission.
+    use_instead: GNUstep libobjc2 (Gershwin already uses it)
+
+  xnu:
+    reason: It's a kernel.
+    use_instead: Linux
+
+# =========================================================================
+# Open questions for review (delete as resolved)
+# =========================================================================
+# 1. file_cmds tag: pick the latest stable file_cmds-* upstream tag.
+# 2. openssh: do we ever actually want this, or is it permanently optional?
+#    If permanent, consider removing it from this file entirely.
+# 3. launchd vs relaunchd: ship both side-by-side initially (real launchd
+#    on default GRUB entry, relaunchd as a backup entry), or pick one?
+# 4. Is there anything missing from this list that we'll regret not pinning
+#    early?
