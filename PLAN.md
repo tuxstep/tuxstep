@@ -6,6 +6,8 @@ This document is the source of truth for TuxSTEP's architecture, scope, and phas
 
 TuxSTEP is a modern NeXT-inspired operating system distribution built on top of the Linux kernel, with an entirely Apple-derived userland. The Linux kernel provides hardware support and ecosystem reach; everything from PID 1 upward is libsystem-linked Apple/Darwin code, supplemented by the GNUstep frameworks (via Gershwin) for Cocoa-style application development.
 
+While TuxSTEP doesn't run prebuilt Mach-O binaries, its **source-level compatibility with macOS is unmatched among Linux distributions**. Apple's libsystem provides BSD APIs (`kqueue`, `kevent`, `mach_absolute_time`, FSEvents-style file watching, NeXT-style signal numbering) that Linux glibc lacks; Apple's headers install at `/System/Library/Headers/`; the GNUstep stack provides source-compatible Cocoa frameworks; and the filesystem layout matches macOS conventions. A macOS application's source typically compiles and runs on TuxSTEP with far fewer patches than on any other Linux system — the porting tax that normally accompanies "Linuxify this Mac code" largely disappears.
+
 **What TuxSTEP is:**
 
 - A Linux distribution where the userspace is Apple's open-source userland
