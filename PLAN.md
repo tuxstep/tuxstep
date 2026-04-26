@@ -10,7 +10,7 @@ TuxSTEP is a modern NeXT-inspired operating system. Linux kernel underneath, **a
 
 **For existing Linux apps**, `pkgwrap` turns any apt package into a self-contained `.app` bundle deployable to `/Local/Applications/`, `/Network/Applications/`, or `~/Applications/` — the Linux ecosystem available on demand, none of it polluting `/System`.
 
-**The filesystem follows NeXT's four-domain model** — `/System`, `/Network`, `/Local`, plus per-user homes under `/Local/Users/<name>`. Cocoa APIs walk the domains automatically. Deployment is drag-and-drop: copy `/System` to a volume, the volume becomes bootable.
+**The filesystem follows NeXT's four-domain model** — `/System`, `/Network`, `/Local`, plus per-user homes under `/Local/Users/<name>` or `/Network/Users/<name>` (for NFS-mounted users that follow you across machines). Cocoa APIs walk the domains automatically. Deployment is drag-and-drop: copy `/System` to a volume, the volume becomes bootable.
 
 **What TuxSTEP is:**
 
