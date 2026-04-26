@@ -25,7 +25,9 @@ RUN apt-get install -y --no-install-recommends \
         grub2-common \
         wget \
         git \
-        xz-utils
+        xz-utils \
+        cmake \
+        build-essential
 
 # Arch-specific GRUB packages
 RUN if [ "$TARGETARCH" = "amd64" ]; then \

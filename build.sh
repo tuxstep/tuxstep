@@ -80,6 +80,14 @@ umount "${WORK}/rootfs/proc" 2>/dev/null || true
 umount "${WORK}/rootfs/dev/pts" 2>/dev/null || true
 umount "${WORK}/rootfs/dev" 2>/dev/null || true
 
+# === Step 3c: Build & install Darling runtime components ===
+# darlingserver is the first piece — ELF Linux daemon, the bridge between
+# Mach-O processes and the Linux kernel. Built on the build host, installed
+# into the rootfs. See ci/build/sources/darlingserver.sh.
+echo "==> Building Darling runtime: darlingserver..."
+WORK="${WORK}" ROOTFS="${WORK}/rootfs" \
+    ./ci/build/sources/darlingserver.sh
+
 # === Step 4: Create squashfs ===
 echo "==> Creating squashfs..."
 mkdir -p "${WORK}/iso/live"
