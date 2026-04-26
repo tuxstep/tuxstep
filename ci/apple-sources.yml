@@ -59,11 +59,6 @@ sources:
       a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
       and socket activation are all straight POSIX.
 
-      Fallback: relaunchd (https://github.com/jmgao/relaunchd) — a clean-
-      room reimplementation, ~10x smaller, drops in if the real launchd
-      port stalls. Decide between them after the first week of porting
-      effort.
-
   # =========================================================================
   # OPTIONAL — only if there's a concrete reason to take it
   # =========================================================================
@@ -173,7 +168,5 @@ not_integrated:
 # 1. file_cmds tag: pick the latest stable file_cmds-* upstream tag.
 # 2. openssh: do we ever actually want this, or is it permanently optional?
 #    If permanent, consider removing it from this file entirely.
-# 3. launchd vs relaunchd: ship both side-by-side initially (real launchd
-#    on default GRUB entry, relaunchd as a backup entry), or pick one?
-# 4. Is there anything missing from this list that we'll regret not pinning
+# 3. Is there anything missing from this list that we'll regret not pinning
 #    early?
