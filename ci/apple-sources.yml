@@ -18,6 +18,12 @@
 #      — also Mach-O against libsystem-port; depend on the runtime layer
 #      and supervise the rest of the system.
 #
+# All four Darling runtime components (dyld, newlkm, darlingserver, Libsystem)
+# are forked into the tuxstep org as github.com/tuxstep/darling-* — preserving
+# provenance via the original Darling repo names. Apple OSS userland sources
+# stay under apple-oss-distributions, with TuxSTEP-specific patches in
+# ci/patches/<name>/.
+#
 # Each entry has a `relationship:` field:
 #   consume                — pull upstream as-is at the pinned tag
 #   consume_with_patches   — pull upstream + apply ci/patches/<name>/*.patch
@@ -44,11 +50,19 @@
 #     ELF binaries link /lib/x86_64-linux-gnu/libc.so.6
 #
 #   Mach-O / libsystem-port track:
-#     Darling runtime (dyld, libsystem-port, mach-o-binfmt module, darlingserver,
-#       libpthread, libplatform, libdispatch, security-shim)
+#     Darling runtime userspace (dyld, libsystem-port, libpthread, libplatform,
+#       libdispatch, security-shim)
 #     Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder, launchd)
 #     User-installed: brew bottles, MacPorts ports, third-party .app bundles
 #     Mach-O binaries link /usr/lib/libSystem.B.dylib
+#
+#   Kernel-side / pre-userspace:
+#     mach-o-binfmt — Linux kernel module (or binfmt_misc registration) that
+#       routes Mach-O exec to /usr/lib/dyld
+#     darlingserver — ELF Linux daemon, started by initramfs BEFORE PID 1.
+#       The bridge between Mach-O processes and the Linux kernel; cannot be
+#       Mach-O itself (chicken-and-egg). Built as standard Linux C++17 ELF
+#       binary against glibc + libstdc++.
 #
 # The kernel routes binaries to their loader by binary format (ELF kernel
 # loader for ELF; mach-o-binfmt module → /usr/lib/dyld for Mach-O). The
@@ -102,12 +116,32 @@ sources:
   # binary on the system runs at all — including launchd-as-PID-1, the Apple
   # OSS userland, and any brew/MacPorts bottle. Has to be in place before
   # Phase 2 binaries can even build (they link against libsystem-port).
+  #
+  # Bootstrap order at boot:
+  #   1. Linux kernel + initramfs starts
+  #   2. mach-o-binfmt registers Mach-O as an executable format (kernel
+  #      module OR binfmt_misc + userspace mldr)
+  #   3. initramfs starts darlingserver (ELF/glibc Linux daemon) — has to
+  #      be running BEFORE the first Mach-O process exists
+  #   4. initramfs pivots to real root, exec()s /sbin/init
+  #   5. /sbin/init -> /System/Library/Tools/launchd (Mach-O); kernel routes
+  #      through mach-o-binfmt -> /usr/lib/dyld -> libsystem-port
+  #   6. libsystem-port connects to already-running darlingserver; Mach IPC
+  #      works from instant zero
+  #   7. launchd starts as PID 1, reads plists, starts the rest of the system
+  #
+  # No chicken-and-egg: darlingserver is in initramfs, not a launchd-managed
+  # plist.
+  #
+  # Note: darlingserver is ELF/glibc, not Mach-O — it's the bridge daemon
+  # and has to be Linux-native to do its job. Everything else in this phase
+  # is Mach-O against libsystem-port.
 
   mach-o-binfmt:
-    repo: https://github.com/darlinghq/darling.git
-    subdir: kernel-module
-    tag: v0.1.20260222
-    relationship: consume
+    repo: https://github.com/tuxstep/darling-newlkm.git
+    forked_from: https://github.com/darlinghq/darling-newlkm.git
+    tag: 353e943673a3        # standalone-repo HEAD as of 2022-07-06
+    relationship: forked
     install_to: kernel module loaded at boot
     notes: >
       Linux kernel module registering Mach-O as an executable format. When
@@ -115,23 +149,31 @@ sources:
       /usr/lib/dyld instead of the ELF loader. Loaded by initramfs before
       launchd starts.
 
+      NB: darling-newlkm is NOT a submodule of the Darling monorepo, and
+      its last upstream commit is 2022-07-06. Likely being phased out in
+      favor of userspace mldr + Linux binfmt_misc. Verify during the
+      integration spike whether we actually need a kernel module or whether
+      binfmt_misc + a userspace Mach-O loader is sufficient. The fork
+      exists either way as a starting point.
+
   dyld:
-    repo: https://github.com/darlinghq/darling.git
-    subdir: src/external/dyld
-    tag: v0.1.20260222
-    relationship: consume_with_patches
+    repo: https://github.com/tuxstep/darling-dyld.git
+    forked_from: https://github.com/darlinghq/darling-dyld.git
+    tag: 63f667cf06d7ed59553adebb0c8d70a117135ac9   # matches monorepo submodule pin (2023-10-15)
+    relationship: forked
     install_to: /usr/lib/dyld
     builds_against: libsystem-port
     notes: >
-      Apple's dyld via Darling's port. Light patches expected for our
-      framework search paths (TuxSTEP's /System/Library/Frameworks should
-      resolve before any prefix paths brew/MacPorts install). Tracked as a
-      submodule or pinned subtree clone; not yet a separate fork.
+      Apple's dyld via Darling's port, forked into the tuxstep org. Patches
+      for TuxSTEP-specific framework search paths (/System/Library/Frameworks
+      first) land via PRs against our fork. The pin SHA matches the Darling
+      monorepo's submodule pointer — known-good combination Darling tests
+      with.
 
   libsystem-port:
-    repo: https://github.com/tuxstep/libsystem-port.git    # not yet created
-    branch: main
-    forked_from: https://github.com/darlinghq/darling.git  # subdir: src/external/libsystem
+    repo: https://github.com/tuxstep/darling-Libsystem.git
+    forked_from: https://github.com/darlinghq/darling-Libsystem.git
+    tag: 08df454b6eb0df9400aa4c39839a7efd6efd2c3c   # matches monorepo submodule pin (2023-10-05)
     relationship: forked
     install_to:
       libSystem:          /usr/lib/libSystem.B.dylib
@@ -169,17 +211,28 @@ sources:
       don't load — accepted v1 scope cut.
 
   darlingserver:
-    repo: https://github.com/darlinghq/darling.git
-    subdir: src/external/darlingserver
-    tag: v0.1.20260222
-    relationship: consume_with_patches
-    install_to: /System/Library/Tools/darlingserver
-    launchd_plist: /System/Library/LaunchDaemons/com.tuxstep.darlingserver.plist
+    repo: https://github.com/tuxstep/darlingserver.git
+    forked_from: https://github.com/darlinghq/darlingserver.git
+    tag: 89751e64bc6c2082f7725061824ee0e33395b0de   # matches monorepo submodule pin (2025-12-06; actively developed)
+    relationship: forked
+    install_to: /usr/sbin/darlingserver           # ELF, FHS — also embedded in initramfs
+    builds_against: glibc                          # NOT libsystem-port — see notes
+    startup: initramfs (pre-PID-1)
     notes: >
-      Userspace Mach IPC daemon. Provides mach_msg, bootstrap_look_up,
-      port-rights semantics, task_for_pid for Mach-O processes that ask.
-      Started by launchd via plist. Bootstrap ordering is delicate — see
-      open question 3 below.
+      Userspace Mach IPC daemon, forked into the tuxstep org. Translates
+      Mach traps and IPC calls from Mach-O processes into Linux syscalls
+      (epoll, sockets, futex, etc.).
+
+      Built as a standard Linux C++17 ELF binary against glibc and libstdc++
+      (verified by reading the upstream CMakeLists.txt: `-Wl,--gc-sections`
+      is GNU-ld-specific, no Mach-O target). NOT against libsystem-port.
+      This is intentional and load-bearing: darlingserver is the bridge
+      between Mach-O processes and the Linux kernel — if it were Mach-O
+      itself, nothing else could run (chicken-and-egg with libsystem-port).
+
+      Started by initramfs before PID 1 — see the Phase 1 header's bootstrap
+      order. Most actively developed of the four runtime forks (last
+      upstream commit 2025-12).
 
   libpthread:
     repo: https://github.com/apple-oss-distributions/libpthread.git
