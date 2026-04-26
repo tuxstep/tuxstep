@@ -8,6 +8,15 @@
 #
 # Tags are pinned conservatively. Refresh every ~6 months.
 # Where a tag is `TBD` we still need to pick one — see comments.
+#
+# Install location convention:
+#   /System/Library/...   — TuxSTEP-specific layer (GNUstep, Gershwin, launchd,
+#                           plists, frameworks). Self-contained and rebuildable;
+#                           can be wiped and reinstalled from source as a unit.
+#   /usr/bin, /usr/sbin   — Apple-flavored BSD/Unix tools that replace or
+#                           supplement Devuan's equivalents (ifconfig, otool,
+#                           xattr). Live outside /System so the system stays
+#                           bootable when /System is being rebuilt.
 
 sources:
 
@@ -18,31 +27,48 @@ sources:
   cctools:
     repo: https://github.com/tpoechtrager/cctools-port.git
     tag: '973.0.1'
-    install_to: /System/Library/Tools/
-    binaries: [otool, lipo, install_name_tool, nm, strip, ar, ranlib]
+    install_to: /usr/bin/
+    binaries: [otool, lipo, install_name_tool]
     notes: >
       Mach-O binary toolchain. tpoechtrager's port already builds cleanly on
       Linux — picked as the warm-up port for the build harness because it's
       the lowest-risk way to validate fetch/patch/build/install end-to-end.
 
+      Only the Mach-O-unique binaries install: otool, lipo, install_name_tool.
+      cctools-port also builds nm/strip/ar/ranlib variants, but those names
+      conflict with GNU binutils, which the Linux toolchain depends on for
+      ELF. We deliberately do not install them. If a developer ever needs
+      Apple's flavor for Mach-O inspection, they can be added later under
+      a x86_64-apple-darwin- prefix without touching the GNU defaults.
+
   network_cmds:
     repo: https://github.com/apple-oss-distributions/network_cmds.git
     tag: network_cmds-621
-    install_to: /System/Library/Tools/
+    install_to:
+      ifconfig: /usr/sbin/ifconfig
+      route:    /usr/sbin/route
+      arp:      /usr/sbin/arp
+      ndp:      /usr/sbin/ndp
+      netstat:  /usr/bin/netstat
     only: [ifconfig, route, netstat, arp, ndp]
+    replaces: net-tools
     notes: >
-      FreeBSD-flavored network UX. Linux equivalents (ip, ss) stay reachable
-      via /usr/bin in the four-domain PATH, so this is additive, not
-      replacing.
+      FreeBSD-flavored network UX. Replaces Devuan's net-tools (which provides
+      ifconfig/route/netstat/arp at the same paths) — we drop net-tools from
+      packages.list and ship Apple's binaries instead. iproute2's `ip` and
+      `ss` stay reachable as Linux-native alternatives. ndp is BSD-only with
+      no Linux conflict.
 
   file_cmds:
     repo: https://github.com/apple-oss-distributions/file_cmds.git
     tag: TBD                           # latest stable file_cmds-* tag
-    install_to: /System/Library/Tools/
+    install_to: /usr/bin/
     only: [xattr]
     notes: >
       Just xattr for macOS-script compat. coreutils handles cp/mv/rm/etc.,
-      so we explicitly do NOT pull the rest of file_cmds.
+      so we explicitly do NOT pull the rest of file_cmds. No name conflict —
+      Devuan doesn't ship an xattr binary; attr's getfattr/setfattr stay
+      installed alongside as the Linux-native equivalent.
 
   # =========================================================================
   # PHASE 2 — Init replacement (the project's actual differentiator)
@@ -51,10 +77,17 @@ sources:
   launchd:
     repo: https://github.com/apple-oss-distributions/launchd.git
     tag: launchd-842.92.1
-    install_to: /sbin/init             # PID 1
-    also_installs:
+    install_to:
+      launchd:   /System/Library/Tools/launchd
       launchctl: /System/Library/Tools/launchctl
+    additional:
+      - /sbin/init -> /System/Library/Tools/launchd   # symlink for kernel PID 1
     notes: >
+      Lives entirely in /System so the TuxSTEP system layer (init, frameworks,
+      apps) can be rebuilt and reinstalled from source as a unit. /sbin/init
+      is a symlink that satisfies the kernel's conventional PID 1 location —
+      everything that actually executes lives under /System.
+
       Real Apple launchd. Mach-bootstrap subsystem is dead code on Linux —
       a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
       and socket activation are all straight POSIX.
