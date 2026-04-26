@@ -273,8 +273,6 @@ No format step required (auto-bless handles partition surgery). No bless command
 │       └── lib/                  bundled glibc + dependency closure
 ```
 
-`pkgwrap --from-apt firefox-esr -o Firefox.app` pulls the package from any apt repo, resolves its full transitive dep tree, and emits the bundle. Also supports `.deb`, AppImage, Flatpak, and static binaries as input.
-
 The Debian/Ubuntu ecosystem becomes available on demand, fully isolated under `/Local/Applications/`. Bundles install/remove via drag-and-drop. No package-manager conflicts.
 
 ## v0.1 demo
