@@ -35,8 +35,8 @@ These are locked. Changing any of them requires a new revision of this document.
 | 5 | Mach IPC: deferred to v0.2 | v0.1 has no daemons that need it; libsimple_darlingserver and darlingserver come back later |
 | 6 | Init: deferred to v0.2 | v0.1 boots to single-user zsh as PID 1 directly. launchd port is post-v0.1. |
 | 7 | Coreutils: Apple BSD-derived | file_cmds, shell_cmds, system_cmds, network_cmds, text_cmds — installed at `/System/Library/Tools/` |
-| 8 | Filesystem layout: Gershwin/NeXT | `/System`, `/Network`, `/Local`, `/Users`. `/boot` retained Linux-conventional for kernel/initramfs/modules/firmware |
-| 9 | Apple source: never modified | Vendored as git submodules in each component repo; all Linux glue lives in parallel `linux-glue/` directories; sync is `git submodule update` |
+| 8 | Filesystem layout: Gershwin/NeXT | Four real top-level directories (`/System`, `/Network`, `/Local`, `/Volumes`). All system-internal Unix infrastructure (etc, var, tmp, dev, sys, kernel images, firmware, modules) lives under `/System/Library/`. No `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/boot`, `/lib`, `/usr`, `/bin`, `/sbin`, `/Users`, `/home`, `/private` at root. |
+| 9 | Apple source: vendored unmodified, build-time patched | Apple-OSS lives as git submodules per component repo; never edited in place. Linux-specific code lives in parallel `linux-glue/` directories. A focused `patches/` series is applied at build time for two purposes: (1) replacing path constants in `<paths.h>` to point at `/System/Library/Private/...`, (2) rewriting any direct path-string literals in Apple source. Sync remains `git submodule update`; patches reapplied at next build. |
 | 10 | Syscall stubs: generated from a table | One source-of-truth `syscall_table.txt` drives all libsystem_kernel stub generation; minimizes hand-maintained code |
 | 11 | Bootloader: GRUB for v0.1 | Pragmatic; pre-userland anyway. Reconsider rEFInd/systemd-boot post-v0.1. |
 | 12 | KMS drivers built into kernel for v0.1 | No userspace module-loading infrastructure needed. Trade ~30-50MB on the kernel image for a vastly simpler v0.1 userland. |
@@ -44,33 +44,53 @@ These are locked. Changing any of them requires a new revision of this document.
 
 ## Filesystem layout (v0.1 ISO root)
 
+Four real directories at root. No symlinks. Everything system-internal lives under `/System/Library/`. More pure than NeXTSTEP itself was.
+
 ```
-/boot/                          kernel image, initramfs (read by GRUB)
-/lib/modules/<kver>/            kernel modules (mostly empty in v0.1; KMS drivers built in)
-/lib/firmware/                  firmware blobs (linux-firmware tarball)
-/System/
-  Library/
-    Libraries/                  libSystem.so, libdispatch.so, libobjc2.so,
-                                libgnustep-base.so, libgnustep-corebase.so
-    Headers/                    Apple + GNUstep headers
-    Tools/                      Apple BSD coreutils, zsh, cc, ld, ar, etc.
-    Makefiles/                  gnustep-make
-  Applications/                 empty in v0.1
-/Network/                       empty in v0.1
-/Local/                         empty in v0.1
-/Users/                         empty in v0.1
-/dev /proc /sys /tmp /var       kernel-managed runtime mounts
-/etc/                           minimal: /etc/passwd with root only
+/                                       ISO root
+│
+├── System/                              the entire OS
+│   └── Library/
+│       ├── Kernels/<kver>/              kernel image, initramfs
+│       ├── Firmware/                    firmware blobs (was /lib/firmware)
+│       ├── Modules/<kver>/              kernel modules (post-v0.1; empty in v0.1)
+│       ├── Libraries/                   libSystem.so, libobjc2.so, libdispatch.so,
+│       │                                libgnustep-base.so, libgnustep-corebase.so
+│       ├── Headers/                     Apple + GNUstep headers
+│       ├── Tools/                       Apple BSD coreutils, zsh, cc, ld, ar, ...
+│       ├── Makefiles/                   gnustep-make
+│       └── Private/                     system-internal Unix infrastructure
+│           ├── etc/                     passwd, hosts, fstab, ...
+│           ├── var/                     logs, state, spool
+│           ├── tmp/                     temp files (tmpfs at runtime)
+│           ├── dev/                     devtmpfs mount point
+│           └── sys/                     sysfs mount point (post-v0.1)
+│
+├── Network/                             site-wide / NFS-mounted (empty in v0.1)
+│   ├── Applications/, Library/, Users/
+│
+├── Local/                               per-machine sysadmin (empty in v0.1)
+│   ├── Applications/, Library/, Users/
+│
+└── Volumes/                             mounted external media
 ```
 
-No `/usr`, no `/bin`, no `/sbin`, no `/usr/local`. The root has only the directories above.
+**No `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/boot`, `/home`, `/Users`, `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/proc`, `/run`, `/mnt`, `/opt`, `/private` at root.** Apple's libsystem and downstream Apple-OSS components are patched at build time so their hardcoded path constants (`_PATH_DEVNULL`, `_PATH_PASSWD`, etc.) and direct string literals point at `/System/Library/Private/...`. Patches live per-component in `patches/` directories; the vendored submodules themselves remain untouched.
+
+User homes (post-v0.1 multi-user support) live under `/Local/Users/<name>` for interactive users and `/Network/Users/<name>` for NFS-mounted users, following Gershwin's NeXT-style convention. There is no top-level `/Users`.
 
 ## Boot chain (v0.1)
 
-1. **GRUB** loads kernel + initramfs from `/boot/`
-2. **Linux kernel** boots; KMS drivers built into the kernel come up automatically; devtmpfs is auto-mounted via `CONFIG_DEVTMPFS_MOUNT=y`; framebuffer console renders at native resolution
-3. **initramfs** (small, transient) mounts the squashfs as the new root and pivots
+1. **GRUB** loads kernel + initramfs from `/System/Library/Kernels/<kver>/`. The grub.cfg points at the in-System path; GRUB doesn't care about the depth.
+2. **Linux kernel** boots. KMS drivers are built into the kernel and come up automatically; framebuffer console renders at native resolution. The kernel opens `/dev/console` from initramfs (initramfs is transient and may have its own conventional layout).
+3. **initramfs** mounts the squashfs as the new root, mounts the kernel-managed filesystems at their /System/Library/Private locations:
+   - `mount -t devtmpfs devtmpfs /System/Library/Private/dev`
+   - `mount -t sysfs sysfs /System/Library/Private/sys` (only if needed; v0.1 may skip)
+   - `mount -t tmpfs tmpfs /System/Library/Private/tmp`
+   - `mount -t tmpfs tmpfs /System/Library/Private/var/run`
 4. **PID 1 = `/System/Library/Tools/zsh`** directly. No init system, no service supervisor, no auth chain. The user is at a `#` prompt as root.
+
+`CONFIG_DEVTMPFS_MOUNT=n` in the kernel config — we mount devtmpfs at the deep path explicitly rather than letting the kernel auto-mount at `/dev`. There is no `/dev` directory at the squashfs root.
 
 When the user types `exit`, the kernel panics with "Attempted to kill init" — expected behavior for a shell-as-PID-1 system. Power off via the syscalls `reboot(2)` / `halt(2)` directly, or via Apple's `reboot` and `halt` commands (which call those syscalls).
 
@@ -107,9 +127,16 @@ Adds a `linux-glue/` directory containing:
 - `kernel/errno_remap.c` — Apple↔Linux errno mapping
 - `compat/apple_only_stubs.c` — `ENOSYS` returns for Apple-only APIs
 
+Adds a `patches/` directory containing build-time patches against Apple-OSS:
+
+- `0001-paths-h-redirect-to-system-library-private.patch` — replaces every `_PATH_*` macro in `<paths.h>` to point at `/System/Library/Private/...`
+- `00NN-libc-direct-literal-*.patch` — patches each direct path literal in libc source (`fopen("/etc/passwd")` → `fopen("/System/Library/Private/etc/passwd")`, etc.)
+
+Patches are applied at build time after `git submodule update`; the vendored submodules themselves are never modified. A `scripts/audit_paths.sh` enumerates direct path literals so new patches can be authored mechanically when Apple introduces them upstream.
+
 Output: `/System/Library/Libraries/libSystem.so`. Installed alongside the constituent libraries.
 
-Day-1 milestone: a hello-world C program compiles against libsystem and prints via `write(2)`.
+Day-1 milestone: a hello-world C program compiles against libsystem and prints via `write(2)`. Validates: zero references to `/dev`, `/etc`, `/var`, `/tmp` outside `/System/Library/Private/` in the produced binary's strings table.
 
 ### Phase 1 — Bootstrap toolchain
 
@@ -163,10 +190,10 @@ Result: `/System/Library/Tools/cc -ObjC -lSystem -lobjc2 -ldispatch -lgnustep-ba
 
 ### Phase 5 — ISO assembly
 
-- Build kernel from `kernel.org` upstream with a focused `.config` (KMS drivers built in, devtmpfs, framebuffer console, common storage/networking, ext4/isofs/squashfs)
-- Compose initramfs (transient; mounts squashfs, pivots, exec's PID 1)
-- Compose squashfs root according to the layout above
-- GRUB `grub.cfg` selecting kernel + initramfs
+- Build kernel from `kernel.org` upstream with a focused `.config`: KMS drivers built in, framebuffer console, common storage/networking, ext4/isofs/squashfs, `CONFIG_DEVTMPFS_MOUNT=n` (we mount it explicitly at `/System/Library/Private/dev`), `CONFIG_EXTRA_FIRMWARE_DIR="/System/Library/Firmware"`
+- Compose initramfs (transient; mounts squashfs, mounts kernel-managed filesystems at `/System/Library/Private/{dev,sys,tmp,var/run}`, pivots, exec's PID 1)
+- Compose squashfs root according to the layout above (four real top-level dirs: `/System`, `/Network`, `/Local`, `/Volumes`; no compat symlinks)
+- GRUB `grub.cfg` references `/System/Library/Kernels/<kver>/{vmlinuz,initramfs}`
 - ISO build pipeline producing both amd64 and arm64 images
 
 ## v0.1 demo
@@ -181,13 +208,13 @@ Linux tuxstep 6.16.0-tuxstep-amd64 #1 SMP ... x86_64
         /System/Library/Libraries/libSystem.so (0x...)
 
 # ls /
-System  Local  Network  Users  boot  dev  etc  lib  proc  sys  tmp  var
+Local  Network  System  Volumes
 
 # ls /System/Library/Libraries/
 libdispatch.so       libgnustep-base.so       libobjc2.so       libSystem.so
 libgnustep-corebase.so
 
-# cat > /tmp/hello.m <<EOF
+# cat > /System/Library/Private/tmp/hello.m <<EOF
 #import <Foundation/Foundation.h>
 int main(void) {
     @autoreleasepool {
@@ -197,12 +224,13 @@ int main(void) {
 EOF
 
 # /System/Library/Tools/cc -ObjC -lSystem -lobjc2 -ldispatch -lgnustep-base \
-        /tmp/hello.m -o /tmp/hello
-# /tmp/hello
+        /System/Library/Private/tmp/hello.m \
+        -o /System/Library/Private/tmp/hello
+# /System/Library/Private/tmp/hello
 2026-XX-XX HH:MM:SS.fff Hello from TuxSTEP v0.1
 ```
 
-That is the v0.1 deliverable. A bootable ISO, both arches, that demonstrates: Linux kernel + Apple libsystem + Apple BSD userland + Gershwin runtime stack + Obj-C compilation, zero glibc anywhere on the system.
+That is the v0.1 deliverable. A bootable ISO, both arches, that demonstrates: Linux kernel + Apple libsystem + Apple BSD userland + Gershwin runtime stack + Obj-C compilation, zero glibc anywhere on the system, four real top-level directories with no compat symlinks. `ls /` shows exactly the system's identity.
 
 ## Component repos
 
@@ -250,14 +278,17 @@ These are not blocking v0.1 work but should be resolved before the milestones th
 
 The architecture is designed so that staying in sync with Apple's open-source releases is bounded and inexpensive:
 
-- **Apple source is never modified.** Patches against Apple-OSS would create merge conflicts on every upstream release. We avoid this by keeping all Linux-specific code in parallel `linux-glue/` directories.
-- **Submodules pinned to specific commits.** Bumping is `git submodule update --remote`, not a merge.
+- **Apple source is vendored unmodified as a submodule.** The submodule is never edited in place. Bumping is `git submodule update --remote`, not a merge.
+- **Linux-specific code lives in parallel `linux-glue/` directories.** Adding kernel-specific behavior never touches Apple source.
+- **Path-rewriting patches live in a separate `patches/` series.** A small, stable set of patches replaces hardcoded `/dev`, `/etc`, `/var`, `/tmp` references with `/System/Library/Private/...` equivalents. Patches are applied at build time after `git submodule update`. They rarely conflict because Apple seldom changes `<paths.h>` macros or path-string literals.
 - **Syscall stubs generated from a table.** When Apple adds a syscall, we add one line to `syscall_table.txt`; no new hand-written code.
+- **A `scripts/audit_paths.sh` enumerates direct path literals** in any newly-vendored Apple source so the patch series can be extended mechanically.
 - **Pin upstream to yearly Apple OSS releases, not tip.** Apple ships tagged source drops; we track those, not the upstream development branches.
 - **Watch CI to detect upstream-bump breakage early.** A weekly automated build against upstream's latest gives advance warning of incoming work without forcing immediate action.
 
-Estimated ongoing sync work after the initial port: 1-3 days per Apple OSS release.
+Estimated ongoing sync work after the initial port: 1-3 days per Apple OSS release. Most bumps require zero changes to the patch series; occasional bumps require adding 1-3 patches if Apple introduced new hardcoded paths in their source.
 
 ## Revision history
 
 - 2026-04-26: Initial plan, v0.1 spec locked. Reflects pivot away from Mach-O-execution approach (Darling-style) toward libsystem-linked ELF userland.
+- 2026-04-26 (rev 2): Filesystem layout cleanup. All system-internal Unix infrastructure (etc, var, tmp, dev, sys, kernel images, firmware, modules) moved under `/System/Library/`. No `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/boot`, `/lib`, `/Users`, `/private` at root. Compat symlinks eliminated by patching Apple-OSS source at build time to use `/System/Library/Private/...` paths. Decision #8 and #9 revised; new `patches/` mechanism added to Phase 0 description and sync workflow. Four real top-level directories: `/System`, `/Network`, `/Local`, `/Volumes`.
