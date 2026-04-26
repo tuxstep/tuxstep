@@ -422,22 +422,10 @@ not_integrated:
     use_instead: Linux
 
 # =========================================================================
-# Open questions for review
+# Open question for review
 # =========================================================================
-# 1. dyld scope: are framework-search-path patches enough, or does dyld-port
-#    need a full fork into github.com/tuxstep/dyld-port? Decide after the
-#    first integration spike — patches in ci/patches/dyld/ until they cross
-#    the "this is unwieldy" threshold.
+# Anything missing from this list that we'll regret not pinning early?
 #
-# 2. security-shim API surface: minimum is SSLCreateContext, SSLHandshake,
-#    SSLRead/Write, SSLClose, SecTrustCreateWithCertificates, SecTrustEvaluate.
-#    What else is load-bearing for the brew bottles you actually want to run?
-#    Worth running otool -L on a target set of bottles and tallying the
-#    Security.framework symbols they import, then sizing the shim to that.
-#
-# 3. Bootstrap order: launchd-as-PID-1 needs darlingserver running for Mach
-#    bootstrap, but darlingserver is itself started by launchd. Darling has
-#    a solution (small inline bootstrap in launchd's startup path); verify
-#    it works for our PID-1-is-launchd setup before this hits the ISO build.
-#
-# 4. Anything missing from this list that we'll regret not pinning early?
+# (Other engineering decisions — dyld fork-vs-patches threshold, security-shim
+# API surface, the launchd ↔ darlingserver bootstrap order — are deferred to
+# the integration spike. Not registry-blocking.)
