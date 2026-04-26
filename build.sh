@@ -1,9 +1,13 @@
 #!/bin/sh
 set -e
 
+# The build container at ghcr.io/tuxstep/tuxstep-build-<arch>:<tag> has the
+# prepared Devuan rootfs at /rootfs (built via mmdebstrap during container
+# build), with darlingserver pre-installed at /rootfs/usr/sbin/. This script
+# packages /rootfs into a bootable hybrid ISO. No debootstrap, no apt-install,
+# no chroot — that all happened at container-build time.
+
 # === Configuration ===
-DIST="excalibur"
-MIRROR="http://deb.devuan.org/merged"
 HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in
     x86_64|i?86) ARCH="amd64" ;;
@@ -13,82 +17,28 @@ esac
 WORK="$(pwd)/work"
 ISO_NAME="tuxstep-$(date +%Y.%m.%d)-${HOST_ARCH}.iso"
 
-# === Clean previous build ===
+if [ ! -d /rootfs ]; then
+    echo "ERROR: /rootfs not found in container — Dockerfile must build it"
+    exit 1
+fi
+
 rm -rf "${WORK}"
-mkdir -p "${WORK}"
-
-# === Step 1: Bootstrap minimal Devuan root filesystem ===
-echo "==> Bootstrapping ${DIST} root filesystem..."
-debootstrap --arch="${ARCH}" --variant=minbase "${DIST}" "${WORK}/rootfs" "${MIRROR}"
-
-# === Step 2: Configure apt sources inside rootfs ===
-cat > "${WORK}/rootfs/etc/apt/sources.list" << EOF
-deb ${MIRROR} ${DIST} main non-free-firmware
-deb ${MIRROR} ${DIST}-security main non-free-firmware
-deb ${MIRROR} ${DIST}-updates main non-free-firmware
-deb ${MIRROR} ${DIST}-backports main non-free-firmware
-EOF
-
-# === Step 2b: Prepare chroot ===
-echo "==> Preparing chroot..."
-mount --bind /dev "${WORK}/rootfs/dev"
-mount --bind /dev/pts "${WORK}/rootfs/dev/pts"
-mount -t proc proc "${WORK}/rootfs/proc"
-mount -t sysfs sysfs "${WORK}/rootfs/sys"
-
-# Prevent services from starting during install
-cat > "${WORK}/rootfs/usr/sbin/policy-rc.d" << 'EOF'
-#!/bin/sh
-exit 101
-EOF
-chmod +x "${WORK}/rootfs/usr/sbin/policy-rc.d"
-
-# === Step 3: Install packages ===
-echo "==> Installing packages..."
-
-# Uncomment arch-specific lines, then strip remaining comments
-cp packages.list packages.list.tmp
-sed -i "s/^#${HOST_ARCH} //g" packages.list.tmp
-PACKAGES=$(grep -v '^#' packages.list.tmp | grep -v '^$' | tr '\n' ' ')
-rm -f packages.list.tmp
-
-chroot "${WORK}/rootfs" /bin/sh -c "
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends ${PACKAGES}
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
-"
-
-# === Step 3b: Hostname + sshd convenience config ===
-echo "tuxstep" > "${WORK}/rootfs/etc/hostname"
-
-# Live-ISO convenience: known root password (CHANGE for any non-dev use)
-chroot "${WORK}/rootfs" /bin/sh -c "echo 'root:tuxstep' | chpasswd"
-sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' "${WORK}/rootfs/etc/ssh/sshd_config"
-
-# === Final cleanup ===
-chroot "${WORK}/rootfs" /bin/sh -c "
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
-    rm -rf /tmp/* /var/tmp/*
-"
-rm -f "${WORK}/rootfs/usr/sbin/policy-rc.d"
-
-umount "${WORK}/rootfs/sys" 2>/dev/null || true
-umount "${WORK}/rootfs/proc" 2>/dev/null || true
-umount "${WORK}/rootfs/dev/pts" 2>/dev/null || true
-umount "${WORK}/rootfs/dev" 2>/dev/null || true
-
-# === Step 4: Create squashfs ===
-echo "==> Creating squashfs..."
 mkdir -p "${WORK}/iso/live"
-cp "${WORK}/rootfs/boot/vmlinuz-"* "${WORK}/iso/live/vmlinuz"
-cp "${WORK}/rootfs/boot/initrd.img-"* "${WORK}/iso/live/initrd.img"
-mksquashfs "${WORK}/rootfs" "${WORK}/iso/live/filesystem.squashfs" \
-    -comp xz -e boot/vmlinuz-* -e boot/initrd.img-*
 
-# === Step 5: Setup GRUB ===
+# === Step 1: Copy kernel + initramfs out of the rootfs ===
+echo "==> Copying kernel and initramfs from /rootfs/boot..."
+cp /rootfs/boot/vmlinuz-* "${WORK}/iso/live/vmlinuz"
+cp /rootfs/boot/initrd.img-* "${WORK}/iso/live/initrd.img"
+
+# === Step 2: Pack the rootfs as a squashfs ===
+# zstd is ~10x faster than xz for ~10% larger output. Worth it on the GHA
+# 4-core runners where xz takes 5-10 min and zstd takes <1.
+echo "==> Creating squashfs (zstd)..."
+mksquashfs /rootfs "${WORK}/iso/live/filesystem.squashfs" \
+    -comp zstd -Xcompression-level 19 \
+    -e boot/vmlinuz-* -e boot/initrd.img-*
+
+# === Step 3: Setup GRUB ===
 echo "==> Setting up GRUB..."
 mkdir -p "${WORK}/iso/boot/grub"
 cp grub.cfg "${WORK}/iso/boot/grub/grub.cfg"
