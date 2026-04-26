@@ -94,12 +94,18 @@ sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /rootfs/etc/ssh/sshd_conf
 EOT
 
 # =========================================================================
-# Build & install Darling runtime: darlingserver into /rootfs/usr/sbin/
+# Darling runtime (darlingserver, dyld, libsystem-port, etc.) — deferred
 # =========================================================================
-
-COPY ci/build/sources/darlingserver.sh /tmp/build-darlingserver.sh
-RUN chmod +x /tmp/build-darlingserver.sh \
- && WORK=/tmp/dswork ROOTFS=/rootfs /tmp/build-darlingserver.sh \
- && rm -rf /tmp/dswork /tmp/build-darlingserver.sh
+# darlingserver isn't standalone-buildable: its duct-tape lib uses CMake's
+# `mig()` function plus `add_darling_library`, ARCH/TRIPLET variables, and
+# the build-mig tool — all defined in the Darling monorepo's cmake/ macros
+# and surrounding build infrastructure, not in any individual fork. Vendoring
+# libsimple worked because it's one .c file; replicating Darling's whole
+# CMake harness outside the monorepo isn't tractable.
+#
+# Will land in a follow-up PR using the monorepo build pattern (clone the
+# whole tree, rewrite .gitmodules to point at our 4 forks, init only headless-
+# relevant submodules per xnulinux/darling's SKIP list, build with
+# -DCOMPONENTS=cli, install just the binaries we want into /rootfs).
 
 WORKDIR /work
