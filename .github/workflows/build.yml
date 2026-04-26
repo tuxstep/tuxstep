@@ -1,0 +1,85 @@
+name: Build TuxSTEP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # Stage 1: build + push the per-arch build-environment containers to ghcr.
+  # If the Dockerfile is unchanged, buildx GHA cache makes this a ~30s no-op.
+  build-containers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    name: Container (${{ matrix.arch }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ci/containers
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:latest
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+
+  # Stage 2: build the ISOs inside the freshly-published containers.
+  # `needs: build-containers` enforces strict ordering — no race.
+  build-iso:
+    needs: build-containers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /proc:/proc
+      options: --privileged
+    name: ISO (${{ matrix.arch }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ISO
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload ISO to continuous release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          ls -lh *.iso
+          wget -c https://github.com/probonopd/uploadtool/raw/master/upload.sh
+          bash upload.sh *.iso
