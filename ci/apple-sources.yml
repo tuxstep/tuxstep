@@ -70,6 +70,20 @@ sources:
       Devuan doesn't ship an xattr binary; attr's getfattr/setfattr stay
       installed alongside as the Linux-native equivalent.
 
+  mDNSResponder:
+    repo: https://github.com/apple-oss-distributions/mDNSResponder.git
+    tag: TBD                           # latest stable mDNSResponder-* tag
+    install_to:
+      mDNSResponder: /usr/sbin/mDNSResponder
+      dns-sd:        /usr/bin/dns-sd
+    only: [mDNSResponder, dns-sd]
+    replaces: avahi-daemon
+    notes: >
+      Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
+      tree (the Mach-coupled mDNSMacOSX layer is skipped). Replaces
+      avahi-daemon — drop avahi from packages.list. Started by launchd via
+      /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
+
   # =========================================================================
   # PHASE 2 — Init replacement (the project's actual differentiator)
   # =========================================================================
@@ -135,10 +149,6 @@ not_integrated:
     reason: SystemConfiguration framework is a Mach-based config service.
     use_instead: NetworkManager / ifupdown (Devuan default)
 
-  mDNSResponder:
-    reason: Apple's daemon is Mach-coupled and bigger than necessary.
-    use_instead: avahi-daemon
-
   shell_cmds:
     reason: GNU coreutils + util-linux are sufficient and well-maintained.
     use_instead: coreutils + util-linux (Devuan default)
@@ -191,5 +201,6 @@ not_integrated:
 # Open questions for review (delete as resolved)
 # =========================================================================
 # 1. file_cmds tag: pick the latest stable file_cmds-* upstream tag.
-# 2. Is there anything missing from this list that we'll regret not pinning
+# 2. mDNSResponder tag: pick the latest stable mDNSResponder-* upstream tag.
+# 3. Is there anything missing from this list that we'll regret not pinning
 #    early?
