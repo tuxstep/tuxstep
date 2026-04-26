@@ -259,22 +259,6 @@ No format step required (auto-bless handles partition surgery). No bless command
 
 **Post-v0.1 deliverable.** v0.1 ships a `dd`-able hybrid ISO (no auto-bless needed — the ISO is its own pre-blessed image). The auto-bless daemon, `newfs`, and `bless` come in v0.2 alongside launchd, when the system has the daemon infrastructure to support background services.
 
-## Linux compatibility — `pkgwrap`
-
-`pkgwrap` (from Gershwin) packages a glibc Linux app and its full dependency closure into a self-contained `.app` bundle under `/Local/Applications/`. A tiny libsystem-linked launcher inside the bundle exec's the binary through the bundle's own `ld-linux`, so the Linux process finds all its deps locally and never touches `/System`.
-
-```
-/Local/Applications/Firefox.app/
-├── Contents/
-│   ├── Info.plist
-│   ├── MacOS/Firefox             libsystem-linked launcher (~5 KB)
-│   └── Linux/
-│       ├── bin/firefox           the ELF Linux binary
-│       └── lib/                  bundled glibc + dependency closure
-```
-
-The Debian/Ubuntu ecosystem becomes available on demand, fully isolated under `/Local/Applications/`. Bundles install/remove via drag-and-drop. No package-manager conflicts.
-
 ## v0.1 demo
 
 Boot the ISO. GRUB menu appears. Kernel boots; KMS detects the GPU and brings up the framebuffer console at native resolution. Squashfs mounts. PID 1 is zsh.
