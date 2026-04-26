@@ -110,6 +110,14 @@ do
     echo "# stubbed for headless cli build (${stubdir})" > "${stubdir}/CMakeLists.txt"
 done
 
+# === Patch Darling for arm64 portability ===
+# cmake/compiler_include.cmake probes the compiler include path by compiling
+# a test file that #includes <cpuid.h>. cpuid.h is x86-only — clang's wrapper
+# #errors out on arm64. Swap the probe to <stdarg.h>, which is also clang-
+# provided in the same compiler include dir on every arch.
+echo "==> Patching cmake/compiler_include.cmake (cpuid.h → stdarg.h for arm64 portability)..."
+sed -i 's|cpuid|stdarg|g' cmake/compiler_include.cmake
+
 # === Configure & build the darlingserver target ===
 # No CMAKE_BUILD_TYPE on purpose: Release made Clang emit chained-fixup
 # relocations that cctools-port ld64 cannot read, breaking dyld linkage.
