@@ -4,15 +4,13 @@ This document is the source of truth for TuxSTEP's architecture, scope, and phas
 
 ## Project identity
 
-TuxSTEP is a modern NeXT-inspired operating system distribution built on top of the Linux kernel, with an entirely Apple-derived userland. The Linux kernel provides hardware support and ecosystem reach; everything from PID 1 upward is libsystem-linked Apple/Darwin code, supplemented by the GNUstep frameworks (via Gershwin) for Cocoa-style application development.
+TuxSTEP is a modern NeXT-inspired operating system. Linux kernel underneath, **a Darwin userland on top**: Apple's libsystem as the system libc, BSD coreutils, and GNUstep frameworks (via Gershwin) for Cocoa-style applications. ELF-formatted, no Mach-O execution.
 
-While TuxSTEP doesn't run prebuilt Mach-O binaries, its **source-level compatibility with macOS is unmatched among Linux distributions**. Apple's libsystem provides BSD APIs (`kqueue`, `kevent`, `mach_absolute_time`, FSEvents-style file watching, NeXT-style signal numbering) that Linux glibc lacks; Apple's headers install at `/System/Library/Headers/`; the GNUstep stack provides source-compatible Cocoa frameworks; and the filesystem layout matches macOS conventions. A macOS application's source typically compiles and runs on TuxSTEP with far fewer patches than on any other Linux system — the porting tax that normally accompanies "Linuxify this Mac code" largely disappears.
+**Source-level macOS compatibility is the practical payoff.** Apple's libsystem provides BSD APIs (`kqueue`, `kevent`, `mach_absolute_time`, FSEvents) that glibc doesn't ship. Apple's headers install at `/System/Library/Headers/`. GNUstep offers source-compatible Cocoa frameworks. macOS source typically compiles on TuxSTEP with far fewer patches than on any other solution.
 
-TuxSTEP is also **a real alternative to the GNU userland that has dominated Linux distributions for three decades**. For all that time, "a Linux distribution" has meant Linux kernel + GNU coreutils + glibc + bash + gcc — to the point that the userland choice has become almost invisible. TuxSTEP demonstrates that the Linux kernel is genuinely permissive about what runs on top: a coherent non-GNU userland (Apple BSD coreutils + libsystem + zsh + clang + Apple/GNUstep frameworks) with its own design philosophy and aesthetic is fully viable. The kernel is the kernel; the userland is a choice — and TuxSTEP is the choice that says *"NeXT, not GNU."*
+**For existing Linux apps**, `pkgwrap` turns any apt package into a self-contained `.app` bundle deployable to `/Local/Applications/`, `/Network/Applications/`, or `~/Applications/` — the Linux ecosystem available on demand, none of it polluting `/System`.
 
-Underpinning everything is **simplicity in design and implementation**. Four real top-level directories instead of FHS's twenty. One libc instead of glibc plus compat shims. One bootloader. Apple source is vendored unmodified — bumping an upstream release is `git submodule update`, never a merge conflict. Per-platform code lives in a single `linux-glue/` tree per component, never sprinkled through the codebase. Deployment is drag-and-drop: copy `/System` to a volume, the volume becomes bootable. No installer scripts, no `/etc/fstab` editing, no package-manager conflicts.
-
-The four-domain filesystem model (System, Network, Local, per-user) inherits NeXT's multi-machine semantics with no special configuration. Site-wide content goes in `/Network`; per-machine sysadmin content in `/Local`; user content in `/Local/Users/<name>`. All four domains share the same structural skeleton, and Cocoa APIs (`NSBundle`, `NSUserDefaults`, the Services system) walk them automatically in user-overrides-most-specific-first order. A site-wide policy plist in `/Network/Library/Preferences` applies to everyone on the network until a user overrides it in their home — no configuration management daemons, no policy-distribution servers, the OS just does it.
+**The filesystem follows NeXT's four-domain model** — `/System`, `/Network`, `/Local`, plus per-user homes under `/Local/Users/<name>` or `/Network/Users/<name>` (for NFS-mounted users that follow you across machines). Cocoa APIs walk the domains automatically. Deployment is drag-and-drop: copy `/System` to a volume, the volume becomes bootable.
 
 **What TuxSTEP is:**
 
@@ -52,7 +50,6 @@ These are locked. Changing any of them requires a new revision of this document.
 | 14 | /System is the OS — drag-and-drop deployable | Copying `/System` to a volume makes that volume bootable, automatically. An auto-bless daemon detects when `/System/Library/Boot/kernel.efi` (or `/System/Library/Boot/kernel` for BIOS) is written to a volume and silently performs whatever partition surgery is needed (creating a hidden ESP and/or BIOS-boot region, installing the GRUB chainloader, updating bootloader config). The drag-and-drop operation itself is non-destructive of existing user data; failure modes are non-corrupting. Classic-Mac-style: format the disk once however you like, drag `/System` to it, the disk becomes bootable. |
 | 15 | Supported architectures: i386 + amd64 + arm64 — required, not optional | Three CPU architectures supported from v0.1. amd64 + arm64 track current Apple-OSS releases. i386 pins to an older Apple-OSS release that still contains full 32-bit code paths (macOS Mojave 10.14 source drops, ~2018) and is maintained as a separate pin in `tuxstep/libsystem-linux`. The i386 build is a first-class deliverable on equal footing with amd64 and arm64; it is not deferrable. The bootloader (GRUB) and auto-bless workflow are arch-independent: same tooling, same drag-and-drop UX on all three archs. The TuxSTEP ISO matrix is i386 + amd64 + arm64; CI gates green on all three. |
 | 16 | Filesystem: ext4 | The `/System` partition is ext4. Chosen for: mature Linux kernel support, crash-safe journaling, mature shrink/resize tooling (`resize2fs`) which the auto-bless daemon depends on for non-destructive partition surgery. HFS+ was considered (better aesthetic match for Apple-flavored userland) but rejected because Linux's HFS+ driver is rougher around the edges and shrink tooling is less reliable. The filesystem is invisible from any user-facing surface; aesthetic energy is spent elsewhere (UTI integration, xattr-based resource forks, NeXT-style format command naming) without sacrificing the technical foundation. |
-| 17 | Linux app compatibility: `pkgwrap` self-contained bundles | Existing glibc-based Linux applications (Firefox, VS Code, Steam, GIMP, etc.) run on TuxSTEP via self-contained `.app` bundles produced by the `pkgwrap` tool. A bundle contains the binary, its full dependency closure (glibc, libstdc++, X11 client libraries, fontconfig, freetype, etc.), and a libsystem-linked launcher that exec's the binary through the bundle's own dynamic linker. Bundles install under `/Local/Applications/` and are entirely isolated from `/System`: they don't pollute the libsystem userland, can't conflict with each other, and need no package manager. The clean NeXT-flavored architecture stays pristine; Linux apps run in their own world. |
 
 ## Filesystem layout (v0.1 ISO root)
 
@@ -261,49 +258,6 @@ No format step required (auto-bless handles partition surgery). No bless command
 
 **Post-v0.1 deliverable.** v0.1 ships a `dd`-able hybrid ISO (no auto-bless needed — the ISO is its own pre-blessed image). The auto-bless daemon, `newfs`, and `bless` come in v0.2 alongside launchd, when the system has the daemon infrastructure to support background services.
 
-## Linux compatibility — `pkgwrap` self-contained bundles
-
-TuxSTEP makes a deliberate, radical break from the GNU userland — but the existing Linux application ecosystem still exists, and TuxSTEP needs a credible answer for "how do I run Firefox / VS Code / Steam / GIMP / `<arbitrary glibc binary>` on this system?" without compromising the clean libsystem-only `/System` layout. The answer is **`pkgwrap`**: a tool that packages a Linux glibc binary plus its full dependency closure into a self-contained `.app` bundle under `/Local/Applications/`.
-
-**Bundle structure:**
-
-```
-/Local/Applications/Firefox.app/
-├── Contents/
-│   ├── Info.plist                 NSBundle metadata, launch options
-│   ├── MacOS/
-│   │   └── Firefox                libsystem-linked launcher (~5 KB)
-│   ├── Resources/                 icons, localizations
-│   ├── Linux/                     foreign-arch stuff lives here
-│   │   ├── bin/firefox            the actual ELF Linux binary
-│   │   └── lib/                   bundled glibc + dependency closure
-│   │       ├── ld-linux-x86-64.so.2
-│   │       ├── libc.so.6
-│   │       ├── libstdc++.so.6
-│   │       ├── libGL.so.1
-│   │       ├── libX11.so.6
-│   │       └── ... ~50-200 .so files depending on app complexity
-```
-
-**How execution works:** the launcher (`Contents/MacOS/Firefox`) is a libsystem-linked process. When invoked, it directly exec's the bundle's *own* `ld-linux-x86-64.so.2` with `--library-path` pointing at the bundle's `lib/`, bypassing the kernel's `PT_INTERP` resolution entirely. The Linux binary loads, finds all its deps inside the bundle, and runs without ever touching `/System`. The cross-libc rule only forbids mixing libcs in one address space; spawning a glibc process from a libsystem process is fine.
-
-**Why this works cleanly:**
-
-- **No /System pollution** — bundle contents are confined to `/Local/Applications/<name>.app/Contents/Linux/`
-- **No package manager wars** — each bundle is a closed dependency closure; conflicting glibc versions across apps don't matter
-- **Drag-and-drop install/remove** — drag a `.app` into `/Local/Applications/`; drag to trash to remove
-- **The radical architecture stays radical** — foreign code is sealed in foreign bundles; libsystem userland stays pristine
-
-**The bridge: `pkgwrap --from-apt`.** TuxSTEP doesn't speak `apt` natively (no glibc, no dpkg in `/System`), but `pkgwrap` does, on the build host. Given an apt repo and a package name, it resolves the full transitive dependency closure, computes the ELF dependency tree, copies everything into a bundle, generates the launcher and Info.plist, and outputs a ready-to-use `.app`. Other input forms supported: raw `.deb`, AppImage, Flatpak, static binary tree.
-
-**This is what makes TuxSTEP's compatibility story real.** Apple's libc would be incompatible with the millions of Linux apps that exist; without a bridge, "we run on Linux kernel" wouldn't translate to a usable system for a developer who needs Firefox + Slack + VS Code on day one. **You bring any apt package; TuxSTEP turns it into an `.app`.** The entire Debian/Ubuntu ecosystem is available on demand without polluting `/System`.
-
-**What this gives TuxSTEP:**
-
-A real compatibility story for the entire existing Linux ecosystem. Any glibc Linux app can be wrapped and run, without a single line of glibc ever appearing in `/System`. The architecture's "no GNU userland" purity is preserved at the `/System` level; foreign code lives in its own bundles, isolated and contained. This is the same mental model macOS uses for `.app` bundles with embedded frameworks, applied to the Linux app ecosystem.
-
-**Post-v0.1 deliverable.** Phase 6 alongside `newfs`, `bless`, and the auto-bless daemon. Same general-purpose tooling stack: a small libsystem-linked utility plus standard Linux tooling under the hood. Repository: `tuxstep/pkgwrap`.
-
 ## v0.1 demo
 
 Boot the ISO. GRUB menu appears. Kernel boots; KMS detects the GPU and brings up the framebuffer console at native resolution. Squashfs mounts. PID 1 is zsh.
@@ -351,7 +305,6 @@ That is the v0.1 deliverable. Three bootable ISOs (i386, amd64, arm64), all of w
 | `tuxstep/gershwin-libsystem-patches` | Phase 4 — patches to rebuild Gershwin stack against libsystem | To create |
 | `tuxstep/grub` | Phase 5 — GRUB fork with TuxSTEP boot UX (silent boot default, Mac-style boot keys: cmd-V verbose, cmd-S single-user, etc.) | To create |
 | `tuxstep/bless` | Phase 6 — `newfs` + `bless` + auto-bless daemon | To create (post-v0.1) |
-| `tuxstep/pkgwrap` | Phase 6 — wraps Linux apps (apt/deb/AppImage/Flatpak/binary) into self-contained `.app` bundles for `/Local/Applications/` | To create (post-v0.1) |
 | `tuxstep/darlingserver` | Mach IPC daemon (deferred to v0.2) | Live, on hold |
 | `tuxstep/darling` | Monorepo fork (Mach-O execution path — abandoned) | Archive |
 | `tuxstep/darling-bootstrap_cmds` | mig (deferred — needed when Mach IPC interface defs become relevant) | On hold |
@@ -403,4 +356,4 @@ Estimated ongoing sync work after the initial port: 1-3 days per Apple OSS relea
 
 - 2026-04-26: Initial plan, v0.1 spec locked. Reflects pivot away from Mach-O-execution approach (Darling-style) toward libsystem-linked ELF userland.
 - 2026-04-26 (rev 2): Filesystem layout cleanup. All system-internal Unix infrastructure (etc, var, tmp, dev, sys, kernel images, firmware, modules) moved under `/System/Library/`. No `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/boot`, `/lib`, `/Users`, `/private` at root. Compat symlinks eliminated by patching Apple-OSS source at build time to use `/System/Library/Private/...` paths. Decision #8 and #9 revised; new `patches/` mechanism added to Phase 0 description and sync workflow. Four real top-level directories: `/System`, `/Network`, `/Local`, `/Volumes`.
-- 2026-04-26 (rev 3): Boot architecture, drag-and-drop deployment, multi-arch commitment, and Linux-app compat story locked in. Decision #11 revised: bootloader is `tuxstep/grub` (forked from upstream GNU GRUB) with TuxSTEP boot UX — silent boot default, Mac-style boot keys (cmd-V verbose, cmd-S single-user, option for boot-volume picker, etc.). Decision #14 added: `/System` is the OS; drag-and-drop deployable via auto-bless daemon that performs non-destructive partition surgery (creating hidden ESP, shrinking ext4 if needed via `resize2fs`). Decision #15 added: i386 + amd64 + arm64 all required from v0.1 — i386 is not optional, not deferrable; pinned to a 2018-era Apple-OSS release that still contains 32-bit code. Decision #16 added: filesystem is ext4 (UFS and HFS+ considered and rejected on technical grounds). Decision #17 added: Linux-app compatibility via `pkgwrap` — self-contained `.app` bundles installed under `/Local/Applications/`, each containing a glibc app and its full dependency closure, exec'd through the bundle's own dynamic linker. `pkgwrap` accepts apt repos, deb files, AppImages, Flatpaks, raw binaries — any apt package becomes a TuxSTEP `.app` without compromising `/System`. Project identity expanded with three new value-proposition paragraphs (source-level macOS compatibility; real alternative to GNU userland; simplicity in design and implementation; four-domain filesystem model). Boot chain section rewritten to describe the hidden 5 MB FAT32 ESP + GRUB chainloader + EFI-stub kernel pattern. New "Volume management" section documents `newfs` / `bless` / auto-bless daemon. New "Linux compatibility" section documents `pkgwrap` and the bundle execution model. Phase plan extended with Phases 6-9 (post-v0.1) for the deployment tooling, launchd, Mach IPC, and GUI stack. Component repos table extended with `tuxstep/grub`, `tuxstep/bless`, and `tuxstep/pkgwrap`.
+- 2026-04-26 (rev 3): Boot architecture, drag-and-drop deployment, and multi-arch commitment locked in. Decisions #11 (bootloader: `tuxstep/grub` fork with silent boot + Mac-style boot keys), #14 (`/System` is the OS, drag-and-drop deployable via auto-bless), #15 (i386 + amd64 + arm64 all required from v0.1), #16 (filesystem: ext4). Boot chain rewritten for the hidden FAT32 ESP + GRUB chainloader + EFI-stub kernel pattern. New "Volume management" section documents `newfs` / `bless` / auto-bless daemon. Phase plan extended with Phases 6-9 (post-v0.1). Component repos table extended with `tuxstep/grub` and `tuxstep/bless`.
