@@ -84,14 +84,54 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      # Only upload to the `continuous` release tag on push to main.
-      # PRs build and validate the ISO but skip the release upload.
-      - name: Upload ISO to continuous release
-        if: github.event_name == 'push'
+      # Upload each arch's ISO as a workflow artifact. The publish job
+      # collects both and pushes to the `continuous` release as a single
+      # sequential step — avoids the parallel-uploader race where two
+      # arches both try to delete-and-recreate the release at once.
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuxstep-iso-${{ matrix.arch }}
+          path: '*.iso'
+          if-no-files-found: error
+          retention-days: 7
+
+  # Stage 3: collect both arch ISOs and publish to the `continuous` release
+  # tag. Single job (not matrix) so there's only one uploader at a time.
+  # Skipped on PRs.
+  publish:
+    needs: build-iso
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Show downloaded artifacts
+        run: ls -lh artifacts/
+
+      - name: Delete previous `continuous` release if any
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          ls -lh *.iso
-          wget -c https://github.com/probonopd/uploadtool/raw/master/upload.sh
-          bash upload.sh *.iso
+          gh release delete continuous \
+              --yes --cleanup-tag \
+              --repo ${{ github.repository }} \
+              || echo "No previous continuous release to delete."
+
+      - name: Publish `continuous` release with both ISOs
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: Continuous build
+          body: |
+            Built from `${{ github.sha }}`.
+
+            GitHub Actions build log: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: artifacts/*.iso
+          prerelease: false
+          make_latest: 'false'
