@@ -59,21 +59,6 @@ sources:
       a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
       and socket activation are all straight POSIX.
 
-  # =========================================================================
-  # OPTIONAL — only if there's a concrete reason to take it
-  # =========================================================================
-
-  openssh:
-    repo: https://github.com/apple-oss-distributions/OpenSSH.git
-    tag: TBD                           # latest OpenSSH-* tag
-    install_to: /usr/sbin/             # FHS — not /System/Library/Tools
-    optional: true
-    notes: >
-      Apple's openssh fork. Default plan: skip — Devuan's stock openssh
-      works fine. Only pull this if/when we want parity with macOS-flavor
-      sshd_config knobs (e.g. ChallengeResponseAuthentication semantics)
-      or Apple's specific PAM integration.
-
 # =========================================================================
 # Explicitly NOT integrated
 # =========================================================================
@@ -162,11 +147,16 @@ not_integrated:
     reason: It's a kernel.
     use_instead: Linux
 
+  openssh:
+    reason: >
+      Devuan's stock openssh works fine. Apple's fork would only add value
+      if we wanted parity with macOS-specific sshd_config knobs or Apple's
+      PAM integration — no concrete reason for that today.
+    use_instead: openssh-server (Devuan default)
+
 # =========================================================================
 # Open questions for review (delete as resolved)
 # =========================================================================
 # 1. file_cmds tag: pick the latest stable file_cmds-* upstream tag.
-# 2. openssh: do we ever actually want this, or is it permanently optional?
-#    If permanent, consider removing it from this file entirely.
-# 3. Is there anything missing from this list that we'll regret not pinning
+# 2. Is there anything missing from this list that we'll regret not pinning
 #    early?
