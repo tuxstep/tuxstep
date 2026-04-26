@@ -3,6 +3,8 @@ name: Build TuxSTEP
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +13,10 @@ permissions:
 
 jobs:
   # Stage 1: build + push the per-arch build-environment containers to ghcr.
-  # If the Dockerfile is unchanged, buildx GHA cache makes this a ~30s no-op.
+  # Push to main → tag `:latest`. PR → tag `:pr-<num>` so PRs don't overwrite
+  # main's working image (a broken Dockerfile in a PR would otherwise break
+  # main's CI). buildx GHA cache shares layers across both, so PR builds are
+  # still fast.
   build-containers:
     strategy:
       fail-fast: false
@@ -29,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --allow-insecure-entitlement security.insecure
 
       - uses: docker/login-action@v3
         with:
@@ -38,10 +45,12 @@ jobs:
 
       - uses: docker/build-push-action@v5
         with:
-          context: ci/containers
+          context: .
+          file: ci/containers/Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:latest
+          allow: security.insecure
+          tags: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'latest' }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
@@ -59,13 +68,13 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:latest
+      image: ghcr.io/${{ github.repository_owner }}/tuxstep-build-${{ matrix.arch }}:${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'latest' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /proc:/proc
-      options: --privileged
+      # No --privileged or /proc bind needed: rootfs prep happened at
+      # container-build time. ISO assembly (mksquashfs / GRUB / xorriso)
+      # runs unprivileged.
     name: ISO (${{ matrix.arch }})
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +84,10 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
+      # Only upload to the `continuous` release tag on push to main.
+      # PRs build and validate the ISO but skip the release upload.
       - name: Upload ISO to continuous release
+        if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

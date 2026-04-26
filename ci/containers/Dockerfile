@@ -5,8 +5,12 @@ ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Bootstrap Devuan keyring so debootstrap can verify package signatures.
-# We trust one insecure fetch of the keyring, then re-update with verification.
+# =========================================================================
+# Build-side tools (used during container build, also stay in the image so
+# the ISO-build job can run mksquashfs/GRUB/xorriso from the container)
+# =========================================================================
+
+# Bootstrap Devuan keyring so mmdebstrap can verify package signatures.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
  && echo "deb http://deb.devuan.org/merged excalibur main" > /etc/apt/sources.list.d/devuan.list \
@@ -14,9 +18,8 @@ RUN apt-get update \
  && apt-get -o APT::Get::AllowUnauthenticated=true install -y --no-install-recommends devuan-keyring \
  && apt-get update
 
-# Build deps (arch-independent)
 RUN apt-get install -y --no-install-recommends \
-        debootstrap \
+        mmdebstrap \
         squashfs-tools \
         xorriso \
         mtools \
@@ -25,9 +28,12 @@ RUN apt-get install -y --no-install-recommends \
         grub2-common \
         wget \
         git \
-        xz-utils
+        xz-utils \
+        zstd \
+        cmake \
+        build-essential \
+        passwd
 
-# Arch-specific GRUB packages
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
         apt-get install -y --no-install-recommends \
             grub-pc-bin grub-efi-amd64-bin; \
@@ -37,5 +43,69 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     fi \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
+
+# =========================================================================
+# Build the Devuan rootfs at /rootfs
+# =========================================================================
+# mmdebstrap is the unprivileged-friendly debootstrap replacement. We use
+# --mode=root with `RUN --security=insecure` (BuildKit) so it can mount
+# /proc /sys /dev inside the rootfs to run package maintainer scripts.
+# Requires the buildx daemon to allow security.insecure entitlement
+# (configured in the workflow).
+
+COPY packages.list /tmp/packages.list
+
+RUN --security=insecure <<EOT bash
+set -ex
+case "$TARGETARCH" in
+    amd64) HOST_ARCH=x86_64 ;;
+    arm64) HOST_ARCH=aarch64 ;;
+esac
+cp /tmp/packages.list /tmp/packages.list.tmp
+sed -i "s/^#\${HOST_ARCH} //g" /tmp/packages.list.tmp
+PACKAGES=\$(grep -v '^#' /tmp/packages.list.tmp | grep -v '^\$' | tr '\n' ',' | sed 's/,\$//')
+rm /tmp/packages.list.tmp /tmp/packages.list
+
+mmdebstrap \
+    --variant=minbase \
+    --architectures="$TARGETARCH" \
+    --include="\$PACKAGES" \
+    --components=main \
+    excalibur \
+    /rootfs \
+    http://deb.devuan.org/merged
+EOT
+
+# =========================================================================
+# Configure the rootfs (apt sources, hostname, sshd, root password)
+# =========================================================================
+
+RUN <<EOT bash
+set -ex
+cat > /rootfs/etc/apt/sources.list <<APT
+deb http://deb.devuan.org/merged excalibur main non-free-firmware
+deb http://deb.devuan.org/merged excalibur-security main non-free-firmware
+deb http://deb.devuan.org/merged excalibur-updates main non-free-firmware
+deb http://deb.devuan.org/merged excalibur-backports main non-free-firmware
+APT
+echo "tuxstep" > /rootfs/etc/hostname
+echo 'root:tuxstep' | chpasswd --root /rootfs
+sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /rootfs/etc/ssh/sshd_config
+EOT
+
+# =========================================================================
+# Darling runtime (darlingserver, dyld, libsystem-port, etc.) — deferred
+# =========================================================================
+# darlingserver isn't standalone-buildable: its duct-tape lib uses CMake's
+# `mig()` function plus `add_darling_library`, ARCH/TRIPLET variables, and
+# the build-mig tool — all defined in the Darling monorepo's cmake/ macros
+# and surrounding build infrastructure, not in any individual fork. Vendoring
+# libsimple worked because it's one .c file; replicating Darling's whole
+# CMake harness outside the monorepo isn't tractable.
+#
+# Will land in a follow-up PR using the monorepo build pattern (clone the
+# whole tree, rewrite .gitmodules to point at our 4 forks, init only headless-
+# relevant submodules per xnulinux/darling's SKIP list, build with
+# -DCOMPONENTS=cli, install just the binaries we want into /rootfs).
 
 WORKDIR /work
