@@ -1,49 +1,88 @@
-# Apple open-source components that TuxSTEP integrates from
-# github.com/apple-oss-distributions and friends.
+# TuxSTEP source registry
 #
-# This file is a *registry only* — no build harness yet. Future PRs will add:
-#   ci/build/fetch-apple-sources.sh   — clone each entry at the pinned tag
-#   ci/build/apply-patches.sh         — apply ci/patches/<name>/*.patch in order
-#   ci/build/build-all.sh             — dispatch to ci/build/sources/<name>.sh
+# Components TuxSTEP integrates from upstream beyond the Devuan substrate and
+# the gershwin-developer source tree. Three categories:
 #
-# Tags are pinned conservatively. Refresh every ~6 months.
-# Where a tag is `TBD` we still need to pick one — see comments.
+#   1. Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder,
+#      launchd) — pulled from github.com/apple-oss-distributions, patched in
+#      ci/patches/<name>/, built against libSystem-port.
 #
-# Install location convention:
-#   /System/Library/...   — TuxSTEP-specific layer (GNUstep, Gershwin, launchd,
-#                           plists, frameworks). Self-contained and rebuildable;
-#                           can be wiped and reinstalled from source as a unit.
-#   /usr/bin, /usr/sbin   — Apple-flavored BSD/Unix tools that replace or
-#                           supplement Devuan's equivalents (ifconfig, otool,
-#                           xattr). Live outside /System so the system stays
-#                           bootable when /System is being rebuilt.
+#   2. Darling-derived runtime layer — Mach-O kernel binfmt, dyld-port,
+#      libSystem-port, darlingserver Mach IPC daemon, libpthread, libplatform,
+#      libdispatch. The runtime that lets Mach-O binaries execute on a Linux
+#      kernel.
+#
+#   3. TuxSTEP forks of upstream components needing heavy modification —
+#      currently libsystem-port and the Security.framework stub. Hosted at
+#      github.com/tuxstep/<component>.
+#
+# Each entry has a `relationship:` field:
+#   consume                — pull upstream as-is at the pinned tag
+#   consume_with_patches   — pull upstream + apply ci/patches/<name>/*.patch
+#   forked                 — pull from a tuxstep/ org fork
+#
+# GNUstep / Gershwin (libobjc2, libs-base, libs-gui, libs-back, libs-corebase,
+# all gershwin-components apps and daemons) are integrated via gershwin-developer
+# at build time and not enumerated here — see build.sh.
+#
+# Tags pinned conservatively; refresh every ~6 months.
+# `TBD` tags need picking — see open questions at end of file.
+
+# =========================================================================
+# Install location convention
+# =========================================================================
+#
+# /System/Library/Frameworks/    Cocoa-API frameworks. GNUstep-built (Foundation
+#                                via libs-base, AppKit via libs-gui, CoreFoundation
+#                                via libs-corebase) and Apple-OSS-derived
+#                                (Security via OpenSSL-stubbed shim). All linked
+#                                against libSystem-port.
+# /System/Library/Tools/         TuxSTEP-layer daemons and tools: launchd,
+#                                launchctl, mDNSResponder, dns-sd, darlingserver.
+# /usr/bin, /usr/sbin/           Apple-flavored BSD/Unix CLI tools (otool,
+#                                ifconfig, xattr, etc.) — Mach-O binaries linked
+#                                against libSystem-port.
+# /usr/lib/libSystem.B.dylib     The libc-equivalent every TuxSTEP-native binary
+#                                links against. Provided by libsystem-port (fork).
+# /usr/lib/system/               libsystem_kernel, libsystem_c, libsystem_pthread,
+#                                libdispatch, libplatform — the constituent
+#                                libraries libSystem.B.dylib re-exports.
+# /usr/lib/dyld                  Mach-O dynamic linker (Darling dyld-port).
+# /lib/x86_64-linux-gnu/         Devuan glibc + ld-linux. Present on disk because
+#                                Devuan's apt/dpkg/sshd require it via hardcoded
+#                                RPATH; hidden from PATH and from anything
+#                                TuxSTEP-native code sees. Substrate plumbing,
+#                                not the system libc.
 
 sources:
 
   # =========================================================================
-  # PHASE 1 — Apple OSS userland (no init replacement yet)
+  # PHASE 1 — Apple OSS standalone CLI tools
   # =========================================================================
+  # Built against libSystem-port. Produce Mach-O binaries in the TuxSTEP rootfs.
 
   cctools:
     repo: https://github.com/tpoechtrager/cctools-port.git
     tag: '973.0.1'
+    relationship: consume_with_patches
     install_to: /usr/bin/
     binaries: [otool, lipo, install_name_tool]
+    builds_against: libsystem-port
     notes: >
-      Mach-O binary toolchain. tpoechtrager's port already builds cleanly on
-      Linux — picked as the warm-up port for the build harness because it's
-      the lowest-risk way to validate fetch/patch/build/install end-to-end.
+      Mach-O binary toolchain. tpoechtrager's port is well-trodden on Linux —
+      the warm-up port for the build harness.
 
-      Only the Mach-O-unique binaries install: otool, lipo, install_name_tool.
-      cctools-port also builds nm/strip/ar/ranlib variants, but those names
-      conflict with GNU binutils, which the Linux toolchain depends on for
-      ELF. We deliberately do not install them. If a developer ever needs
-      Apple's flavor for Mach-O inspection, they can be added later under
-      a x86_64-apple-darwin- prefix without touching the GNU defaults.
+      Only Mach-O-unique binaries install: otool, lipo, install_name_tool.
+      cctools-port also builds nm/strip/ar/ranlib variants; those names
+      conflict with GNU binutils (which the Linux toolchain depends on for
+      ELF), so we deliberately do not install them. If a developer ever
+      needs Apple's flavor for Mach-O inspection, they can be added later
+      under a x86_64-apple-darwin- prefix without touching the GNU defaults.
 
   network_cmds:
     repo: https://github.com/apple-oss-distributions/network_cmds.git
     tag: network_cmds-621
+    relationship: consume_with_patches
     install_to:
       ifconfig: /usr/sbin/ifconfig
       route:    /usr/sbin/route
@@ -52,9 +91,10 @@ sources:
       netstat:  /usr/bin/netstat
     only: [ifconfig, route, netstat, arp, ndp]
     replaces: net-tools
+    builds_against: libsystem-port
     notes: >
       FreeBSD-flavored network UX. Replaces Devuan's net-tools (which provides
-      ifconfig/route/netstat/arp at the same paths) — we drop net-tools from
+      ifconfig/route/netstat/arp at the same paths) — drop net-tools from
       packages.list and ship Apple's binaries instead. iproute2's `ip` and
       `ss` stay reachable as Linux-native alternatives. ndp is BSD-only with
       no Linux conflict.
@@ -62,8 +102,10 @@ sources:
   file_cmds:
     repo: https://github.com/apple-oss-distributions/file_cmds.git
     tag: TBD                           # latest stable file_cmds-* tag
+    relationship: consume_with_patches
     install_to: /usr/bin/
     only: [xattr]
+    builds_against: libsystem-port
     notes: >
       Just xattr for macOS-script compat. coreutils handles cp/mv/rm/etc.,
       so we explicitly do NOT pull the rest of file_cmds. No name conflict —
@@ -71,86 +113,214 @@ sources:
       installed alongside as the Linux-native equivalent.
 
   # =========================================================================
-  # PHASE 2 — Init replacement and launchd-managed daemons
+  # PHASE 2 — launchd as PID 1, and launchd-managed daemons
   # =========================================================================
+  # With the Darling runtime layer (Phase 3) in place, Mach IPC is functional
+  # via darlingserver — so Mach-using code paths in these daemons stay
+  # ENABLED. They talk to darlingserver instead of an Apple kernel.
 
   launchd:
     repo: https://github.com/apple-oss-distributions/launchd.git
     tag: launchd-842.92.1
+    relationship: consume_with_patches
     install_to:
       launchd:   /System/Library/Tools/launchd
       launchctl: /System/Library/Tools/launchctl
     additional:
       - /sbin/init -> /System/Library/Tools/launchd   # symlink for kernel PID 1
+    builds_against: libsystem-port
     notes: >
       Lives entirely in /System so the TuxSTEP system layer (init, frameworks,
       apps) can be rebuilt and reinstalled from source as a unit. /sbin/init
       is a symlink that satisfies the kernel's conventional PID 1 location —
       everything that actually executes lives under /System.
 
-      Real Apple launchd. Mach-bootstrap subsystem is dead code on Linux —
-      a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
-      and socket activation are all straight POSIX.
+      Real Apple launchd. Mach-bootstrap subsystem stays enabled — it talks
+      to darlingserver for the underlying IPC. Job spawning, KeepAlive,
+      plist parsing, and socket activation are POSIX. The bootstrap server
+      is one of darlingserver's clients, so launchd-via-Mach-bootstrap and
+      launchd-via-POSIX-sockets coexist.
 
   mDNSResponder:
     repo: https://github.com/apple-oss-distributions/mDNSResponder.git
     tag: TBD                           # latest stable mDNSResponder-* tag
+    relationship: consume_with_patches
     install_to:
       mDNSResponder: /System/Library/Tools/mDNSResponder
       dns-sd:        /System/Library/Tools/dns-sd
     only: [mDNSResponder, dns-sd]
     replaces: avahi-daemon
+    builds_against: libsystem-port
     notes: >
       Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
-      tree (the Mach-coupled mDNSMacOSX layer is skipped). Replaces
-      avahi-daemon — drop avahi from packages.list.
+      tree — the IOKit-coupled mDNSMacOSX layer is skipped (we don't have
+      IOKit). Replaces avahi-daemon — drop avahi from packages.list.
 
-      Lives in /System alongside launchd because it's a launchd-managed
-      service: without launchd as PID 1 there's no supervisor to run it,
-      so it ships in Phase 2, not Phase 1. Started by launchd via
+      Lives in /System alongside launchd because it's launchd-managed:
+      without launchd as PID 1 there's no supervisor to run it. Started via
       /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
+
+  # =========================================================================
+  # PHASE 3 — Darling runtime layer (Mach-O on a Linux kernel)
+  # =========================================================================
+  # The components below are what lets Mach-O binaries run at all. Without
+  # them TuxSTEP is "Apple userland + GNUstep on Devuan." With them TuxSTEP
+  # can execute Mach-O bottles from brew / MacPorts (subject to framework
+  # coverage; see security-shim and the not_integrated list for what's NOT
+  # provided).
+
+  dyld:
+    repo: https://github.com/darlinghq/darling.git
+    subdir: src/external/dyld
+    tag: TBD                           # pin to specific Darling commit/tag
+    relationship: consume_with_patches
+    install_to: /usr/lib/dyld
+    builds_against: libsystem-port
+    notes: >
+      Apple's dyld via Darling's port. Light patches expected for our
+      framework search paths (TuxSTEP's /System/Library/Frameworks should
+      resolve before any prefix paths brew/MacPorts install). Tracked as a
+      submodule or pinned subtree clone; not yet a separate fork.
+
+  mach-o-binfmt:
+    repo: https://github.com/darlinghq/darling.git
+    subdir: kernel-module
+    tag: TBD
+    relationship: consume
+    install_to: kernel module loaded at boot
+    notes: >
+      Linux kernel module registering Mach-O as an executable format. When
+      the kernel exec()'s a Mach-O binary, this module dispatches it through
+      /usr/lib/dyld instead of the ELF loader. Loaded early in boot before
+      launchd starts.
+
+  libsystem-port:
+    repo: https://github.com/tuxstep/libsystem-port.git    # not yet created
+    branch: main
+    forked_from: https://github.com/darlinghq/darling.git  # subdir: src/external/libsystem
+    relationship: forked
+    install_to:
+      libSystem:          /usr/lib/libSystem.B.dylib
+      libsystem_kernel:   /usr/lib/system/libsystem_kernel.dylib
+      libsystem_c:        /usr/lib/system/libsystem_c.dylib
+      libsystem_info:     /usr/lib/system/libsystem_info.dylib
+      libsystem_m:        /usr/lib/system/libsystem_m.dylib
+      libsystem_malloc:   /usr/lib/system/libsystem_malloc.dylib
+      libsystem_notify:   /usr/lib/system/libsystem_notify.dylib
+      # additional libsystem_*.dylib subcomponents added as they're implemented
+    notes: >
+      Forked because TuxSTEP wants:
+
+        - Different framework search paths (/System/Library/Frameworks
+          resolved first, then /Local/Library/Frameworks, then prefix paths
+          brew/MacPorts install).
+        - GNUstep-flavored Foundation/AppKit/CoreFoundation symbol forwarding
+          (Mac binaries calling into NSObject reach libobjc2 + libs-base, not
+          Apple's runtime + Foundation).
+        - Removed Apple-private dependencies we don't replicate.
+
+      libsystem_kernel is the Mach-trap-to-Linux-syscall layer; that's the
+      part Darling has done the heavy lifting on, and we inherit it.
+
+  darlingserver:
+    repo: https://github.com/darlinghq/darling.git
+    subdir: src/external/darlingserver
+    tag: TBD
+    relationship: consume_with_patches
+    install_to: /System/Library/Tools/darlingserver
+    launchd_plist: /System/Library/LaunchDaemons/com.tuxstep.darlingserver.plist
+    notes: >
+      Userspace Mach IPC daemon. Provides mach_msg, bootstrap_look_up,
+      port-rights semantics, task_for_pid for Mach-O processes that ask.
+      Started by launchd via plist. Bootstrap ordering is delicate — see
+      open question 4 below.
+
+  libpthread:
+    repo: https://github.com/apple-oss-distributions/libpthread.git
+    tag: TBD
+    relationship: consume
+    install_to: /usr/lib/system/libsystem_pthread.dylib
+    notes: >
+      Apple's libpthread (Darling vendors a pinned version). Wired through
+      libSystem-port. Mostly Linux-portable.
+
+  libplatform:
+    repo: https://github.com/apple-oss-distributions/libplatform.git
+    tag: TBD
+    relationship: consume
+    install_to: /usr/lib/system/libsystem_platform.dylib
+    notes: >
+      Apple's libplatform — low-level platform code (TLS, locks, atomics).
+      Linux-portable.
+
+  libdispatch:
+    repo: https://github.com/apple/swift-corelibs-libdispatch.git
+    tag: TBD
+    relationship: consume
+    install_to: /usr/lib/system/libdispatch.dylib
+    notes: >
+      Apple's open libdispatch (the swift-corelibs version, well-maintained
+      on Linux). Wired through libSystem-port. GCD's dispatch_async, queue
+      semantics, etc. work natively.
+
+  security-shim:
+    repo: https://github.com/tuxstep/security-shim.git    # not yet created
+    branch: main
+    relationship: forked
+    install_to:
+      Security: /System/Library/Frameworks/Security.framework/Versions/A/Security
+    additional:
+      - /System/Library/Frameworks/Security.framework/Security ->
+          Versions/A/Security                            # framework version symlink
+    notes: >
+      Stub Security.framework forwarding SSL APIs (SSLCreateContext,
+      SSLHandshake, SSLRead/Write, SecTrustCreateWithCertificates,
+      SecTrustEvaluate, etc.) to OpenSSL. Keychain APIs return errors
+      gracefully. Codesign/notarization APIs are no-ops (always "valid").
+
+      Lets brew bottles using SecureTransport for TLS work without porting
+      Apple's full Security.framework. Tools that genuinely need keychain
+      or codesign features (xcrun, codesign(1), authd-talking utilities)
+      stay broken — accepted scope cut.
 
 # =========================================================================
 # Explicitly NOT integrated
 # =========================================================================
-# These show up in apple-oss-distributions but are deliberately out of scope.
-# Listed here so future contributors see the rationale and don't reopen the
-# question casually.
+# Things in apple-oss-distributions or Darling that are deliberately out of
+# scope. Listed here so future contributors see the rationale and don't
+# casually reopen the question.
 
 not_integrated:
 
   Foundation:
     reason: Apple's Foundation is not open source.
-    use_instead: GNUstep libs-base (Gershwin already builds it)
+    use_instead: GNUstep libs-base. libsystem-port forwards Foundation.framework
+                 symbol lookups to libs-base.
 
   CoreFoundation:
     reason: >
       Apple's CF is bound to Mach IPC and CFRunLoop semantics that don't map
-      to Linux. The open swift-corelibs-foundation is OK but we can use
-      libs-corebase from Gershwin for the same surface area.
-    use_instead: libs-corebase (Gershwin)
-
-  Libsystem:
-    reason: Wraps Mach traps. Glibc covers the same job on Linux.
-    use_instead: glibc
-
-  libdispatch:
-    reason: >
-      A clean Linux fork already exists and is well-maintained.
-    use_instead: libdispatch.dev (https://github.com/apple/swift-corelibs-libdispatch)
-
-  OpenDirectory:
-    reason: >
-      Architecturally tied to Apple's DirectoryService daemon. Gershwin's
-      dshelper is the right substrate on Linux.
-    use_instead: Gershwin dshelper
+      cleanly even with darlingserver-backed Mach. libs-corebase covers the
+      API surface most Mac binaries actually use without dragging in private
+      Mach traps.
+    use_instead: libs-corebase from Gershwin. Wired into
+                 /System/Library/Frameworks/CoreFoundation.framework via
+                 libsystem-port symbol forwarding.
 
   IOKit:
-    reason: Mach + xnu coupling; no Linux equivalent. Userspace probes /sys.
-    use_instead: udev / sysfs
+    reason: Mach + xnu coupling and kernel device-tree assumptions. The
+            equivalent on Linux is udev + sysfs + drm. Mac binaries calling
+            IOKit will fail at runtime — accepted scope cut.
+    use_instead: udev / sysfs / drm
+
+  OpenDirectory:
+    reason: Architecturally tied to Apple's DirectoryService daemon; Gershwin's
+            dshelper is the right substrate.
+    use_instead: Gershwin dshelper
 
   configd:
-    reason: SystemConfiguration framework is a Mach-based config service.
+    reason: SystemConfiguration framework is a Mach-based config service tied
+            tightly to Apple's network plumbing.
     use_instead: NetworkManager / ifupdown (Devuan default)
 
   shell_cmds:
@@ -162,49 +332,57 @@ not_integrated:
     use_instead: coreutils (Devuan default)
 
   file_cmds_other:
-    reason: >
-      Aside from xattr (above), the rest of file_cmds duplicates coreutils.
+    reason: Aside from xattr (above), the rest of file_cmds duplicates coreutils.
     use_instead: coreutils (Devuan default)
 
   system_cmds:
     reason: >
-      Investigated and dropped. dshelper maintains its own plist-backed
-      data store (NSDictionary keyed by username with a passwordHash field,
-      verified in dshelper.m) — it does NOT consume /etc/master.passwd or
+      Investigated and dropped. dshelper maintains its own plist-backed data
+      store (NSDictionary keyed by username with a passwordHash field, verified
+      in dshelper.m) — it does NOT consume /etc/master.passwd or
       /etc/{pwd,spwd}.db, so pwd_mkdb has no role here. Every other binary
-      we might want has a working Linux equivalent: vipw via shadow-utils,
-      getty via util-linux's agetty, getconf via glibc, vifs is marginal,
-      and Apple's sysctl is incompatible with Linux /proc/sys.
+      we might want has a working Linux equivalent (vipw / shadow-utils,
+      getty / util-linux's agetty, getconf / glibc, vifs marginal), and
+      Apple's sysctl is incompatible with Linux /proc/sys.
     use_instead: util-linux + shadow-utils + glibc (Devuan defaults)
 
-  Security:
-    reason: >
-      Tightly coupled to Mach + Apple's Keychain Services. The pieces we'd
-      want (CommonCrypto-equivalents) are already in OpenSSL/libsodium.
-    use_instead: OpenSSL / libsodium
+  openssh:
+    reason: Devuan's stock openssh works fine. Apple's fork would only add
+            value for parity with macOS-specific sshd_config knobs or PAM
+            integration — no concrete need today.
+    use_instead: openssh-server (Devuan default)
 
   objc4:
-    reason: >
-      Apple's Objective-C runtime. Only relevant if we ever want unmodified
-      Mac binary compatibility — that's the corner-2 port from the design
-      doc, not the TuxSTEP v1 mission.
-    use_instead: GNUstep libobjc2 (Gershwin already uses it)
+    reason: Apple's Objective-C runtime. libobjc2 from Gershwin already
+            provides a complete, more modern implementation, and libsystem-port
+            forwards the runtime symbols to it.
+    use_instead: libobjc2 (Gershwin already uses it)
 
   xnu:
     reason: It's a kernel.
     use_instead: Linux
 
-  openssh:
-    reason: >
-      Devuan's stock openssh works fine. Apple's fork would only add value
-      if we wanted parity with macOS-specific sshd_config knobs or Apple's
-      PAM integration — no concrete reason for that today.
-    use_instead: openssh-server (Devuan default)
-
 # =========================================================================
-# Open questions for review (delete as resolved)
+# Open questions for review
 # =========================================================================
-# 1. file_cmds tag: pick the latest stable file_cmds-* upstream tag.
-# 2. mDNSResponder tag: pick the latest stable mDNSResponder-* upstream tag.
-# 3. Is there anything missing from this list that we'll regret not pinning
-#    early?
+# 1. Tags TBD: file_cmds, mDNSResponder, dyld (which Darling commit/tag),
+#    mach-o-binfmt, darlingserver, libpthread, libplatform, libdispatch.
+#    Pin all in one pass once we've done a Darling integration spike.
+#
+# 2. dyld scope: are framework-search-path patches enough, or does dyld-port
+#    need a full fork into github.com/tuxstep/dyld-port? Decide after the
+#    first integration spike — patches in ci/patches/dyld/ until they cross
+#    the "this is unwieldy" threshold.
+#
+# 3. security-shim API surface: minimum is SSLCreateContext, SSLHandshake,
+#    SSLRead/Write, SSLClose, SecTrustCreateWithCertificates, SecTrustEvaluate.
+#    What else is load-bearing for the brew bottles you actually want to run?
+#    Worth running otool -L on a target set of bottles and tallying the
+#    Security.framework symbols they import, then sizing the shim to that.
+#
+# 4. Bootstrap order: launchd-as-PID-1 needs darlingserver running for Mach
+#    bootstrap, but darlingserver is itself started by launchd. Darling has
+#    a solution (small inline bootstrap in launchd's startup path); verify
+#    it works for our PID-1-is-launchd setup before this hits the ISO build.
+#
+# 5. Anything missing from this list that we'll regret not pinning early?
