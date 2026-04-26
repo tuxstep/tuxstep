@@ -9,7 +9,7 @@ TuxSTEP is a modern NeXT-inspired operating system distribution built on top of 
 **What TuxSTEP is:**
 
 - A Linux distribution where the userspace is Apple's open-source userland
-- A NeXT-inspired filesystem and design model (`/System`, `/Network`, `/Local`, `/Users`)
+- A NeXT-inspired filesystem and design model (`/System`, `/Network`, `/Local`, `/Volumes`)
 - A foundation for Cocoa-style application development on Linux hardware
 - Rooted in Apple's libsystem as the system libc, not glibc
 
@@ -38,9 +38,12 @@ These are locked. Changing any of them requires a new revision of this document.
 | 8 | Filesystem layout: Gershwin/NeXT | Four real top-level directories (`/System`, `/Network`, `/Local`, `/Volumes`). All system-internal Unix infrastructure (etc, var, tmp, dev, sys, kernel images, firmware, modules) lives under `/System/Library/`. No `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/boot`, `/lib`, `/usr`, `/bin`, `/sbin`, `/Users`, `/home`, `/private` at root. |
 | 9 | Apple source: vendored unmodified, build-time patched | Apple-OSS lives as git submodules per component repo; never edited in place. Linux-specific code lives in parallel `linux-glue/` directories. A focused `patches/` series is applied at build time for two purposes: (1) replacing path constants in `<paths.h>` to point at `/System/Library/Private/...`, (2) rewriting any direct path-string literals in Apple source. Sync remains `git submodule update`; patches reapplied at next build. |
 | 10 | Syscall stubs: generated from a table | One source-of-truth `syscall_table.txt` drives all libsystem_kernel stub generation; minimizes hand-maintained code |
-| 11 | Bootloader: GRUB for v0.1 | Pragmatic; pre-userland anyway. Reconsider rEFInd/systemd-boot post-v0.1. |
+| 11 | Bootloader: `tuxstep/grub` (forked from upstream GRUB) | GRUB is the only mainstream bootloader that handles BIOS (i386, amd64) and UEFI (i386, amd64, arm64) from a single codebase. We fork upstream GNU GRUB into `tuxstep/grub` to add TuxSTEP-specific behavior: silent boot by default, Mac-style boot-key shortcuts (cmd-V for verbose boot, cmd-S for single-user mode, option/alt to pick boot volume, shift for safe-boot, C to boot from CD, etc., mapped to physical keys appropriate to each arch's keyboard), TuxSTEP-styled boot screen, and any patches needed for the chainloader-on-hidden-ESP layout. Per-arch GRUB binaries are built once (grub-pc, grub-efi-ia32, grub-efi-amd64, grub-efi-arm64) and shipped on every TuxSTEP ISO. On UEFI: a 5 MB FAT32 ESP holds a thin GRUB stub. On BIOS: GRUB stage 1 in MBR, stage 1.5 in BIOS-boot partition. Kernel built with `CONFIG_EFI_STUB=y` for UEFI archs so the kernel image is itself a valid EFI binary; BIOS path uses standard kernel + initramfs loading. The actual boot artifacts always live at `/System/Library/Boot/` on the ext4 partition; the ESP / BIOS-boot region only contains the chainloader stub. |
 | 12 | KMS drivers built into kernel for v0.1 | No userspace module-loading infrastructure needed. Trade ~30-50MB on the kernel image for a vastly simpler v0.1 userland. |
 | 13 | Base distribution: none | We do not derive from Devuan, Debian, or any Linux distribution at runtime. Devuan may be used as a build host to cross-compile; the resulting ISO contains zero Devuan binaries. |
+| 14 | /System is the OS — drag-and-drop deployable | Copying `/System` to a volume makes that volume bootable, automatically. An auto-bless daemon detects when `/System/Library/Boot/kernel.efi` (or `/System/Library/Boot/kernel` for BIOS) is written to a volume and silently performs whatever partition surgery is needed (creating a hidden ESP and/or BIOS-boot region, installing the GRUB chainloader, updating bootloader config). The drag-and-drop operation itself is non-destructive of existing user data; failure modes are non-corrupting. Classic-Mac-style: format the disk once however you like, drag `/System` to it, the disk becomes bootable. |
+| 15 | Supported architectures: i386 + amd64 + arm64 — required, not optional | Three CPU architectures supported from v0.1. amd64 + arm64 track current Apple-OSS releases. i386 pins to an older Apple-OSS release that still contains full 32-bit code paths (macOS Mojave 10.14 source drops, ~2018) and is maintained as a separate pin in `tuxstep/libsystem-linux`. The i386 build is a first-class deliverable on equal footing with amd64 and arm64; it is not deferrable. The bootloader (GRUB) and auto-bless workflow are arch-independent: same tooling, same drag-and-drop UX on all three archs. The TuxSTEP ISO matrix is i386 + amd64 + arm64; CI gates green on all three. |
+| 16 | Filesystem: ext4 | The `/System` partition is ext4. Chosen for: mature Linux kernel support, crash-safe journaling, mature shrink/resize tooling (`resize2fs`) which the auto-bless daemon depends on for non-destructive partition surgery. HFS+ was considered (better aesthetic match for Apple-flavored userland) but rejected because Linux's HFS+ driver is rougher around the edges and shrink tooling is less reliable. The filesystem is invisible from any user-facing surface; aesthetic energy is spent elsewhere (UTI integration, xattr-based resource forks, NeXT-style format command naming) without sacrificing the technical foundation. |
 
 ## Filesystem layout (v0.1 ISO root)
 
@@ -81,16 +84,30 @@ User homes (post-v0.1 multi-user support) live under `/Local/Users/<name>` for i
 
 ## Boot chain (v0.1)
 
-1. **GRUB** loads kernel + initramfs from `/System/Library/Kernels/<kver>/`. The grub.cfg points at the in-System path; GRUB doesn't care about the depth.
-2. **Linux kernel** boots. KMS drivers are built into the kernel and come up automatically; framebuffer console renders at native resolution. The kernel opens `/dev/console` from initramfs (initramfs is transient and may have its own conventional layout).
-3. **initramfs** mounts the squashfs as the new root, mounts the kernel-managed filesystems at their /System/Library/Private locations:
+The disk is laid out as two GPT partitions:
+
+```
+Disk:
+├── Partition 1: FAT32 ESP, 5 MB, hidden    (chainloader stub only — never auto-mounted)
+└── Partition 2: ext4, rest of disk
+    └── /System/...                          (entire OS)
+```
+
+Boot sequence:
+
+1. **UEFI firmware** reads partition 1 (the hidden ESP) and executes `\EFI\BOOT\BOOTX64.EFI` (or `BOOTAA64.EFI` on arm64). This is a thin GRUB or rEFInd stub (~1-3 MB) that knows how to read ext4.
+2. **Stub bootloader** reads its config (which references partition 2 by UUID) and executes `/System/Library/Boot/kernel.efi`.
+3. **Linux kernel** (built with `CONFIG_EFI_STUB=y`, so the kernel image *is* an EFI binary) boots from there. KMS drivers built into the kernel come up automatically; framebuffer console renders at native resolution.
+4. **initramfs** (small, transient — embedded in the kernel image or loaded as a separate file from `/System/Library/Boot/initramfs`) mounts the squashfs/ext4 root, mounts the kernel-managed filesystems at their `/System/Library/Private` locations:
    - `mount -t devtmpfs devtmpfs /System/Library/Private/dev`
    - `mount -t sysfs sysfs /System/Library/Private/sys` (only if needed; v0.1 may skip)
    - `mount -t tmpfs tmpfs /System/Library/Private/tmp`
    - `mount -t tmpfs tmpfs /System/Library/Private/var/run`
-4. **PID 1 = `/System/Library/Tools/zsh`** directly. No init system, no service supervisor, no auth chain. The user is at a `#` prompt as root.
+5. **PID 1 = `/System/Library/Tools/zsh`** directly. No init system, no service supervisor, no auth chain. The user is at a `#` prompt as root.
 
 `CONFIG_DEVTMPFS_MOUNT=n` in the kernel config — we mount devtmpfs at the deep path explicitly rather than letting the kernel auto-mount at `/dev`. There is no `/dev` directory at the squashfs root.
+
+The 5 MB FAT32 ESP is hidden by partition flags and never appears in `ls /`, `mount`, or `df` output — it's plumbing required by UEFI firmware, not part of the running system. After initial setup, kernel updates only write to `/System/Library/Boot/` on the ext4 partition; the ESP itself is touched once at install and never again.
 
 When the user types `exit`, the kernel panics with "Attempted to kill init" — expected behavior for a shell-as-PID-1 system. Power off via the syscalls `reboot(2)` / `halt(2)` directly, or via Apple's `reboot` and `halt` commands (which call those syscalls).
 
@@ -103,7 +120,16 @@ When the user types `exit`, the kernel panics with "Attempted to kill init" — 
 | 2 | Apple BSD coreutils + zsh ported to libsystem | 3-4 months |
 | 3 | `mount`, `umount`, `fsck.ext4` ports (small subset, just enough for ISO) | 2-3 weeks |
 | 4 | Gershwin stack rebuilt against libsystem (libobjc2, libdispatch, tools-make, libs-base, libs-corebase) | 1-2 months |
-| 5 | Kernel config + initramfs + ISO assembly | 1-2 months |
+| 5 | Kernel config + initramfs + ISO assembly with chainloader-on-hidden-ESP layout | 1-2 months |
+
+Post-v0.1 (informational; not part of v0.1 timeline):
+
+| Phase | Component |
+|---|---|
+| 6 | `newfs`, `bless`, auto-bless daemon — drag-and-drop deployment model |
+| 7 | launchd as PID 1 + login chain + multi-user |
+| 8 | darlingserver + libsimple_darlingserver (Mach IPC for ELF callers) |
+| 9 | Display server, libs-gui rebuilt against libsystem, Eau, Workspace.app |
 
 **Total to v0.1: roughly 10-13 months of focused work.**
 
@@ -193,8 +219,38 @@ Result: `/System/Library/Tools/cc -ObjC -lSystem -lobjc2 -ldispatch -lgnustep-ba
 - Build kernel from `kernel.org` upstream with a focused `.config`: KMS drivers built in, framebuffer console, common storage/networking, ext4/isofs/squashfs, `CONFIG_DEVTMPFS_MOUNT=n` (we mount it explicitly at `/System/Library/Private/dev`), `CONFIG_EXTRA_FIRMWARE_DIR="/System/Library/Firmware"`
 - Compose initramfs (transient; mounts squashfs, mounts kernel-managed filesystems at `/System/Library/Private/{dev,sys,tmp,var/run}`, pivots, exec's PID 1)
 - Compose squashfs root according to the layout above (four real top-level dirs: `/System`, `/Network`, `/Local`, `/Volumes`; no compat symlinks)
-- GRUB `grub.cfg` references `/System/Library/Kernels/<kver>/{vmlinuz,initramfs}`
-- ISO build pipeline producing both amd64 and arm64 images
+- GRUB stage on hidden 5 MB FAT32 ESP (UEFI) and/or BIOS-boot region (legacy BIOS); `grub.cfg` references `/System/Library/Boot/kernel.efi` (UEFI) or `/System/Library/Boot/kernel` + initramfs (BIOS) on the ext4 partition
+- ISO build pipeline producing **i386, amd64, and arm64 images** (all three are required v0.1 deliverables; CI gates on all three turning green simultaneously)
+
+## Volume management — drag-and-drop deployment
+
+TuxSTEP's deployment model is classic-Mac: **`/System` is the OS. Drag it to a volume, the volume becomes bootable.** Three tools support this, all post-v0.1 deliverables:
+
+**`newfs <disk>`** — convenience tool to format a disk for TuxSTEP (creates the layout: 5 MB hidden FAT32 ESP + ext4 spanning the rest, pre-installs the chainloader on the ESP). Destructive of any existing data on the disk, like any format command. Optional — disks formatted by other means also work, the auto-bless daemon handles the partition surgery on the fly.
+
+**`bless <volume>`** — explicit command to make a volume bootable. Inspects the volume's partition layout; if no ESP exists, creates one (non-destructively shrinks the ext4 partition by 5 MB if necessary using `resize2fs`, then carves out an ESP partition). Installs the chainloader, writes the bootloader config to reference `/System/Library/Boot/kernel.efi` on the ext4 partition. User-explicit; for users who want to bless without copying.
+
+**Auto-bless daemon** (launchd-managed post-v0.1) — watches mounted volumes via `fanotify` for `/System/Library/Boot/kernel.efi` being written. When detected, performs the same logic as `bless` automatically and silently:
+- If the volume already has an ESP (TuxSTEP-formatted), updates the bootloader config inside it. Non-destructive, no partition table changes.
+- If the volume has no ESP but has free space at the start, reorganizes the partition table to declare an ESP region and installs the chainloader. Non-destructive of data.
+- If the volume needs an ext4 shrink to make room, runs `resize2fs` on the unmounted partition. Non-destructive of data, takes a few seconds on near-empty disks.
+- If the volume is 100% full and can't be shrunk, logs a notice and stops. The user's data is preserved; the disk just doesn't auto-bless. They can free space and the next `/System` write triggers a retry.
+
+The user-visible workflow is:
+
+```
+$ cp -aR /System /Volumes/NewDisk/    # this is the only command the user ever needs
+$                                     # disk is now bootable
+```
+
+No format step required (auto-bless handles partition surgery). No bless command required (auto-bless does it). Like classic Mac: drag the System Folder, the disk is ready.
+
+**Cross-arch:** the same auto-bless daemon and same workflow apply to **i386, amd64, and arm64**. Each `/System` tree is per-arch (binaries can't cross archs), so users pick the right `/System` build for the target machine. The tooling is identical across all three archs; the contents differ. Bless logic adapts to the firmware mode it detects:
+- **UEFI volumes** (modern amd64, arm64): bless creates/updates the hidden 5 MB FAT32 ESP and writes the chainloader.
+- **BIOS volumes** (legacy i386, amd64): bless installs GRUB stage 1 to the MBR and stage 1.5 to a BIOS-boot region or post-MBR gap. No FAT32 ESP needed in pure-BIOS deployments.
+- **Hybrid volumes** (amd64 with both BIOS and UEFI firmware support): bless installs both, allowing the same disk to boot in either firmware mode.
+
+**Post-v0.1 deliverable.** v0.1 ships a `dd`-able hybrid ISO (no auto-bless needed — the ISO is its own pre-blessed image). The auto-bless daemon, `newfs`, and `bless` come in v0.2 alongside launchd, when the system has the daemon infrastructure to support background services.
 
 ## v0.1 demo
 
@@ -230,7 +286,7 @@ EOF
 2026-XX-XX HH:MM:SS.fff Hello from TuxSTEP v0.1
 ```
 
-That is the v0.1 deliverable. A bootable ISO, both arches, that demonstrates: Linux kernel + Apple libsystem + Apple BSD userland + Gershwin runtime stack + Obj-C compilation, zero glibc anywhere on the system, four real top-level directories with no compat symlinks. `ls /` shows exactly the system's identity.
+That is the v0.1 deliverable. Three bootable ISOs (i386, amd64, arm64), all of which demonstrate: Linux kernel + Apple libsystem + Apple BSD userland + Gershwin runtime stack + Obj-C compilation, zero glibc anywhere on the system, four real top-level directories with no compat symlinks. `ls /` shows exactly the system's identity. CI gates green on all three architectures simultaneously before v0.1 is declared shipping.
 
 ## Component repos
 
@@ -241,6 +297,8 @@ That is the v0.1 deliverable. A bootable ISO, both arches, that demonstrates: Li
 | `tuxstep/toolchain-libsystem` | Phase 1 — clang/lld rebuilt against libsystem | To create |
 | `tuxstep/coreutils-darwin-linux` | Phase 2 — Apple BSD coreutils + zsh ports | To create |
 | `tuxstep/gershwin-libsystem-patches` | Phase 4 — patches to rebuild Gershwin stack against libsystem | To create |
+| `tuxstep/grub` | Phase 5 — GRUB fork with TuxSTEP boot UX (silent boot default, Mac-style boot keys: cmd-V verbose, cmd-S single-user, etc.) | To create |
+| `tuxstep/bless` | Phase 6 — `newfs` + `bless` + auto-bless daemon | To create (post-v0.1) |
 | `tuxstep/darlingserver` | Mach IPC daemon (deferred to v0.2) | Live, on hold |
 | `tuxstep/darling` | Monorepo fork (Mach-O execution path — abandoned) | Archive |
 | `tuxstep/darling-bootstrap_cmds` | mig (deferred — needed when Mach IPC interface defs become relevant) | On hold |
@@ -292,3 +350,4 @@ Estimated ongoing sync work after the initial port: 1-3 days per Apple OSS relea
 
 - 2026-04-26: Initial plan, v0.1 spec locked. Reflects pivot away from Mach-O-execution approach (Darling-style) toward libsystem-linked ELF userland.
 - 2026-04-26 (rev 2): Filesystem layout cleanup. All system-internal Unix infrastructure (etc, var, tmp, dev, sys, kernel images, firmware, modules) moved under `/System/Library/`. No `/etc`, `/var`, `/tmp`, `/dev`, `/sys`, `/boot`, `/lib`, `/Users`, `/private` at root. Compat symlinks eliminated by patching Apple-OSS source at build time to use `/System/Library/Private/...` paths. Decision #8 and #9 revised; new `patches/` mechanism added to Phase 0 description and sync workflow. Four real top-level directories: `/System`, `/Network`, `/Local`, `/Volumes`.
+- 2026-04-26 (rev 3): Boot architecture, drag-and-drop deployment, multi-arch commitment locked in. Decision #11 revised: bootloader is `tuxstep/grub` (forked from upstream GNU GRUB) with TuxSTEP boot UX — silent boot default, Mac-style boot keys (cmd-V verbose, cmd-S single-user, option for boot-volume picker, etc.). Decision #14 added: `/System` is the OS; drag-and-drop deployable via auto-bless daemon that performs non-destructive partition surgery (creating hidden ESP, shrinking ext4 if needed via `resize2fs`). Decision #15 added: i386 + amd64 + arm64 all required from v0.1 — i386 is not optional, not deferrable; pinned to a 2018-era Apple-OSS release that still contains 32-bit code. Decision #16 added: filesystem is ext4 (UFS and HFS+ considered and rejected on technical grounds). Boot chain section rewritten to describe the hidden 5 MB FAT32 ESP + GRUB chainloader + EFI-stub kernel pattern. New "Volume management" section documents `newfs` / `bless` / auto-bless daemon. Phase plan extended with Phases 6-9 (post-v0.1) for the deployment tooling, launchd, Mach IPC, and GUI stack. Component repos table extended with `tuxstep/grub` and `tuxstep/bless`.
