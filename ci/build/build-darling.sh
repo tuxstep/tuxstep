@@ -90,6 +90,26 @@ done
 echo "    initializing ${#KEEP[@]} of ${#ALL[@]} submodules (skipping ${#SKIP[@]})"
 git submodule update --init --depth=1 --recursive --jobs=8 -- "${KEEP[@]}"
 
+# === Stub CMakeLists.txt for skipped submodule paths ===
+# At Darling tag v0.1.20260222, src/CMakeLists.txt unconditionally calls
+# add_subdirectory() on src/external/swift and src/external/libressl-2.{2.9,5.5,6.5}
+# even when -DBUILD_SWIFT=OFF / -DBUILD_LEGACY_LIBRESSL=OFF are set. The empty
+# submodule paths exist (git creates them when registered) but have no
+# CMakeLists.txt, causing the configure to fail. Stub each with an empty
+# CMakeLists.txt so add_subdirectory() succeeds and adds nothing to the build.
+# (xnulinux/darling's master HEAD has the proper conditional gates and doesn't
+# need this stubbing; we'd revisit if/when we switch our pin.)
+echo "==> Stubbing CMakeLists.txt for skipped submodule paths..."
+for stubdir in \
+    src/external/swift \
+    src/external/libressl-2.2.9 \
+    src/external/libressl-2.5.5 \
+    src/external/libressl-2.6.5
+do
+    mkdir -p "${stubdir}"
+    echo "# stubbed for headless cli build (${stubdir})" > "${stubdir}/CMakeLists.txt"
+done
+
 # === Configure & build the darlingserver target ===
 # No CMAKE_BUILD_TYPE on purpose: Release made Clang emit chained-fixup
 # relocations that cctools-port ld64 cannot read, breaking dyld linkage.
