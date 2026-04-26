@@ -94,18 +94,46 @@ sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /rootfs/etc/ssh/sshd_conf
 EOT
 
 # =========================================================================
-# Darling runtime (darlingserver, dyld, libsystem-port, etc.) — deferred
+# Darling build deps + runtime build
 # =========================================================================
-# darlingserver isn't standalone-buildable: its duct-tape lib uses CMake's
-# `mig()` function plus `add_darling_library`, ARCH/TRIPLET variables, and
-# the build-mig tool — all defined in the Darling monorepo's cmake/ macros
-# and surrounding build infrastructure, not in any individual fork. Vendoring
-# libsimple worked because it's one .c file; replicating Darling's whole
-# CMake harness outside the monorepo isn't tractable.
-#
-# Will land in a follow-up PR using the monorepo build pattern (clone the
-# whole tree, rewrite .gitmodules to point at our 4 forks, init only headless-
-# relevant submodules per xnulinux/darling's SKIP list, build with
-# -DCOMPONENTS=cli, install just the binaries we want into /rootfs).
+# We use the monorepo build pattern (clone darlinghq/darling, rewrite
+# .gitmodules to point at our 4 forks where applicable, init only headless-
+# relevant submodules, build with -DCOMPONENTS=cli). See
+# ci/build/build-darling.sh for details and rationale.
+
+# Apt deps required by Darling's build (matches xnulinux/darling's known-
+# working set). gcc-multilib is amd64-only; arm64 has no multilib for x86_64.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        clang \
+        bison \
+        flex \
+        pkg-config \
+        libfuse-dev \
+        libudev-dev \
+        libxml2-dev \
+        libelf-dev \
+        libcap2-bin \
+        libbsd-dev \
+        libdbus-1-dev \
+        libssl-dev \
+        python3 \
+        libstdc++-12-dev \
+        linux-libc-dev \
+        dpkg-dev \
+        ccache \
+ && if [ "$TARGETARCH" = "amd64" ]; then \
+        apt-get install -y --no-install-recommends gcc-multilib; \
+    fi \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build Darling from source and install darlingserver into /rootfs/usr/sbin/.
+# The whole monorepo (~5-10 GB during build) is cleaned up at the end of the
+# RUN, so the layer adds only the size of the installed binary.
+COPY ci/build/build-darling.sh /tmp/build-darling.sh
+RUN chmod +x /tmp/build-darling.sh \
+ && WORK=/tmp/dwork ROOTFS=/rootfs /tmp/build-darling.sh \
+ && rm -rf /tmp/dwork /tmp/build-darling.sh
 
 WORKDIR /work
