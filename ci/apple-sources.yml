@@ -29,30 +29,68 @@
 # `TBD` tags need picking — see open questions at end of file.
 
 # =========================================================================
+# Architecture: dual-track ELF and Mach-O coexist
+# =========================================================================
+#
+# Two parallel tracks share the filesystem and kernel resources, but NOT
+# in-process libraries.
+#
+#   ELF / glibc track:
+#     Devuan substrate (bash, sshd, apt, dpkg, kernel modules)
+#     xlibre, GNUstep (libs-base, libs-gui, libs-back, libs-corebase, libobjc2)
+#     Gershwin desktop apps (Workspace.app, LoginWindow, SystemPreferences,
+#       dshelper, gpbs, defaults, plutil, etc.)
+#     ELF binaries link /lib/x86_64-linux-gnu/libc.so.6
+#
+#   Mach-O / libsystem-port track:
+#     Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder, launchd)
+#     Darling runtime (dyld, libsystem-port, mach-o-binfmt module, darlingserver,
+#       libpthread, libplatform, libdispatch, security-shim)
+#     User-installed: brew bottles, MacPorts ports, third-party .app bundles
+#     Mach-O binaries link /usr/lib/libSystem.B.dylib
+#
+# The kernel routes binaries to their loader by binary format (ELF kernel
+# loader for ELF; mach-o-binfmt module → /usr/lib/dyld for Mach-O). The
+# tracks coexist transparently — no shell switch, no namespace tricks.
+#
+# CROSS-TRACK RULE. A single process loads libraries from one track only.
+# Mach-O processes don't dlopen() ELF .so files; ELF processes don't
+# dlopen() Mach-O dylibs. Cross-track communication works fine ACROSS
+# processes (pipes, sockets, signals, files — libc-agnostic at the kernel
+# boundary).
+#
+# Consequence: GNUstep's ELF Foundation (libs-base) is unreachable from a
+# Mach-O brew bottle that links Apple's Foundation in-process. Accepted v1
+# scope cut — most CLI bottles don't link Foundation; pure C/C++ bottles
+# work. Future work could build GNUstep a second time as Mach-O against
+# libsystem-port to cover this case; out of scope for v1.
+
+# =========================================================================
 # Install location convention
 # =========================================================================
 #
-# /System/Library/Frameworks/    Cocoa-API frameworks. GNUstep-built (Foundation
-#                                via libs-base, AppKit via libs-gui, CoreFoundation
-#                                via libs-corebase) and Apple-OSS-derived
-#                                (Security via OpenSSL-stubbed shim). All linked
-#                                against libSystem-port.
-# /System/Library/Tools/         TuxSTEP-layer daemons and tools: launchd,
-#                                launchctl, mDNSResponder, dns-sd, darlingserver.
-# /usr/bin, /usr/sbin/           Apple-flavored BSD/Unix CLI tools (otool,
-#                                ifconfig, xattr, etc.) — Mach-O binaries linked
-#                                against libSystem-port.
-# /usr/lib/libSystem.B.dylib     The libc-equivalent every TuxSTEP-native binary
-#                                links against. Provided by libsystem-port (fork).
+# /System/Library/Frameworks/    GNUstep-built ELF Cocoa-API frameworks
+#                                (Foundation via libs-base, AppKit via libs-gui,
+#                                CoreFoundation via libs-corebase) plus Apple-
+#                                OSS-derived (Security via OpenSSL-stubbed shim,
+#                                Mach-O).
+# /System/Library/Tools/         TuxSTEP-layer Mach-O daemons and tools (launchd,
+#                                launchctl, mDNSResponder, dns-sd, darlingserver).
+# /System/Applications/          Native ELF Gershwin app bundles (.app
+#                                directories containing ELF executables built
+#                                against GNUstep).
+# /Applications/                 User-installed .app bundles (typically Mach-O
+#                                if from brew/MacPorts/third-party).
+# /usr/bin, /usr/sbin/           Apple-flavored BSD/Unix Mach-O CLI tools (otool,
+#                                ifconfig, xattr, etc.) — link libsystem-port.
+# /usr/lib/libSystem.B.dylib     libc-equivalent every Mach-O TuxSTEP-native
+#                                binary links against (libsystem-port).
 # /usr/lib/system/               libsystem_kernel, libsystem_c, libsystem_pthread,
-#                                libdispatch, libplatform — the constituent
-#                                libraries libSystem.B.dylib re-exports.
+#                                libdispatch, libplatform — constituent dylibs.
 # /usr/lib/dyld                  Mach-O dynamic linker (Darling dyld-port).
-# /lib/x86_64-linux-gnu/         Devuan glibc + ld-linux. Present on disk because
-#                                Devuan's apt/dpkg/sshd require it via hardcoded
-#                                RPATH; hidden from PATH and from anything
-#                                TuxSTEP-native code sees. Substrate plumbing,
-#                                not the system libc.
+# /lib/x86_64-linux-gnu/         Devuan glibc + ld-linux. Used by ELF binaries
+#                                via their hardcoded RPATH. Not on PATH; not
+#                                visible to Mach-O code.
 
 sources:
 
@@ -209,18 +247,30 @@ sources:
       libsystem_notify:   /usr/lib/system/libsystem_notify.dylib
       # additional libsystem_*.dylib subcomponents added as they're implemented
     notes: >
-      Forked because TuxSTEP wants:
+      Forked from Darling's libsystem-port for TuxSTEP-specific framework
+      search paths (/System/Library/Frameworks resolved first, then
+      /Local/Library/Frameworks, then prefix paths brew/MacPorts install)
+      and removal of Apple-private dependencies we don't replicate.
 
-        - Different framework search paths (/System/Library/Frameworks
-          resolved first, then /Local/Library/Frameworks, then prefix paths
-          brew/MacPorts install).
-        - GNUstep-flavored Foundation/AppKit/CoreFoundation symbol forwarding
-          (Mac binaries calling into NSObject reach libobjc2 + libs-base, not
-          Apple's runtime + Foundation).
-        - Removed Apple-private dependencies we don't replicate.
+      Source chain. Apple open-sources most libSystem constituents at
+      github.com/apple-oss-distributions/{Libc, libpthread, libplatform,
+      libdispatch, libmalloc, libnotify, xnu, Libsystem, xpc} under APSL 2.0.
+      Apple drops the source after each macOS release; they do not develop
+      in the open. Darling has done ~10 years of work pulling those drops,
+      patching them to build on Linux (replacing Mach traps with darlingserver
+      IPC, replacing XNU syscalls with Linux syscalls, building without
+      Apple's xcrun), and filling gaps Apple does not open-source (libcorecrypto
+      stubs forwarding to OpenSSL, libsystem_info pieces, build glue). We
+      inherit Darling's Linux work and add TuxSTEP-specific patches on top.
 
-      libsystem_kernel is the Mach-trap-to-Linux-syscall layer; that's the
-      part Darling has done the heavy lifting on, and we inherit it.
+      libsystem_kernel is the Mach-trap-to-Linux-syscall layer — the part
+      Darling has done the heavy lifting on.
+
+      libsystem-port does NOT forward Foundation/AppKit/Cocoa symbols to
+      GNUstep. GNUstep is ELF/glibc; libsystem-port is Mach-O. Mixing them
+      in a single process would cross-load incompatible libcs (heap
+      corruption hazard). Mach-O apps that link Apple's Foundation just
+      don't load — accepted v1 scope cut.
 
   darlingserver:
     repo: https://github.com/darlinghq/darling.git
@@ -294,18 +344,21 @@ not_integrated:
 
   Foundation:
     reason: Apple's Foundation is not open source.
-    use_instead: GNUstep libs-base. libsystem-port forwards Foundation.framework
-                 symbol lookups to libs-base.
+    use_instead: GNUstep libs-base — available to ELF/glibc TuxSTEP-native
+                 apps (Gershwin desktop, etc.). NOT available to Mach-O apps:
+                 a Mach-O brew bottle that links Apple's Foundation does not
+                 load. Accepted v1 scope cut. Could be revisited by building
+                 GNUstep twice (once Mach-O against libsystem-port) — out of
+                 scope for v1.
 
   CoreFoundation:
     reason: >
       Apple's CF is bound to Mach IPC and CFRunLoop semantics that don't map
       cleanly even with darlingserver-backed Mach. libs-corebase covers the
-      API surface most Mac binaries actually use without dragging in private
-      Mach traps.
-    use_instead: libs-corebase from Gershwin. Wired into
-                 /System/Library/Frameworks/CoreFoundation.framework via
-                 libsystem-port symbol forwarding.
+      API surface most ELF/GNUstep apps actually use.
+    use_instead: libs-corebase from Gershwin — for ELF/glibc TuxSTEP-native
+                 apps. Mach-O apps that link Apple's CoreFoundation do not
+                 load (same cross-libc constraint as Foundation above).
 
   IOKit:
     reason: Mach + xnu coupling and kernel device-tree assumptions. The
@@ -354,9 +407,10 @@ not_integrated:
 
   objc4:
     reason: Apple's Objective-C runtime. libobjc2 from Gershwin already
-            provides a complete, more modern implementation, and libsystem-port
-            forwards the runtime symbols to it.
-    use_instead: libobjc2 (Gershwin already uses it)
+            provides a complete, more modern implementation for the ELF track.
+            Mach-O apps that link Apple's libobjc4 do not load (same
+            cross-libc constraint).
+    use_instead: libobjc2 (Gershwin already uses it on the ELF track)
 
   xnu:
     reason: It's a kernel.
