@@ -8,7 +8,7 @@ TuxSTEP is a modern NeXT-inspired operating system. Linux kernel underneath, **a
 
 **Source-level macOS compatibility is the practical payoff.** Apple's libsystem provides BSD APIs (`kqueue`, `kevent`, `mach_absolute_time`, FSEvents) that glibc doesn't ship. Apple's headers install at `/System/Library/Headers/`. GNUstep offers source-compatible Cocoa frameworks. macOS source typically compiles on TuxSTEP with far fewer patches than on any other solution.
 
-**For existing Linux apps**, `pkgwrap` turns any apt package into a self-contained `.app` bundle under `/Local/Applications/` — the Linux ecosystem available on demand, none of it polluting `/System`.
+**For existing Linux apps**, `pkgwrap` turns any apt package into a self-contained `.app` bundle deployable to `/Local/Applications/`, `/Network/Applications/`, or `~/Applications/` — the Linux ecosystem available on demand, none of it polluting `/System`.
 
 **The filesystem follows NeXT's four-domain model** — `/System`, `/Network`, `/Local`, plus per-user homes under `/Local/Users/<name>`. Cocoa APIs walk the domains automatically. Deployment is drag-and-drop: copy `/System` to a volume, the volume becomes bootable.
 
