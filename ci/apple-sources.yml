@@ -25,16 +25,6 @@ sources:
       Linux — picked as the warm-up port for the build harness because it's
       the lowest-risk way to validate fetch/patch/build/install end-to-end.
 
-  system_cmds:
-    repo: https://github.com/apple-oss-distributions/system_cmds.git
-    tag: system_cmds-960.0.16
-    install_to: /System/Library/Tools/
-    only: [pwd_mkdb, getty, vipw, vifs, getconf]
-    notes: >
-      Skipping Apple's `sysctl` — its BSD MIB doesn't map cleanly to Linux's
-      /proc/sys interface. pwd_mkdb is the one we actually need (dshelper
-      consumes it). getty is useful for serial-console plists later.
-
   network_cmds:
     repo: https://github.com/apple-oss-distributions/network_cmds.git
     tag: network_cmds-621
@@ -148,6 +138,17 @@ not_integrated:
     reason: >
       Aside from xattr (above), the rest of file_cmds duplicates coreutils.
     use_instead: coreutils (Devuan default)
+
+  system_cmds:
+    reason: >
+      Investigated and dropped. dshelper maintains its own plist-backed
+      data store (NSDictionary keyed by username with a passwordHash field,
+      verified in dshelper.m) — it does NOT consume /etc/master.passwd or
+      /etc/{pwd,spwd}.db, so pwd_mkdb has no role here. Every other binary
+      we might want has a working Linux equivalent: vipw via shadow-utils,
+      getty via util-linux's agetty, getconf via glibc, vifs is marginal,
+      and Apple's sysctl is incompatible with Linux /proc/sys.
+    use_instead: util-linux + shadow-utils + glibc (Devuan defaults)
 
   Security:
     reason: >
