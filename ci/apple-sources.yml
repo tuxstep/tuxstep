@@ -3,18 +3,20 @@
 # Components TuxSTEP integrates from upstream beyond the Devuan substrate and
 # the gershwin-developer source tree. Three categories:
 #
-#   1. Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder,
-#      launchd) — pulled from github.com/apple-oss-distributions, patched in
-#      ci/patches/<name>/, built against libSystem-port.
-#
-#   2. Darling-derived runtime layer — Mach-O kernel binfmt, dyld-port,
+#   1. Darling-derived runtime layer — Mach-O kernel binfmt, dyld-port,
 #      libSystem-port, darlingserver Mach IPC daemon, libpthread, libplatform,
-#      libdispatch. The runtime that lets Mach-O binaries execute on a Linux
-#      kernel.
+#      libdispatch, security-shim. The runtime that lets Mach-O binaries
+#      execute on a Linux kernel. This is a prerequisite for everything
+#      Mach-O below it.
 #
-#   3. TuxSTEP forks of upstream components needing heavy modification —
-#      currently libsystem-port and the Security.framework stub. Hosted at
-#      github.com/tuxstep/<component>.
+#   2. Apple OSS userland (cctools, network_cmds, file_cmds) — pulled from
+#      github.com/apple-oss-distributions, patched in ci/patches/<name>/,
+#      built against libsystem-port (so they need the runtime layer above
+#      to exist before they can build OR run).
+#
+#   3. launchd as PID 1 + launchd-managed daemons (launchd, mDNSResponder)
+#      — also Mach-O against libsystem-port; depend on the runtime layer
+#      and supervise the rest of the system.
 #
 # Each entry has a `relationship:` field:
 #   consume                — pull upstream as-is at the pinned tag
@@ -26,7 +28,6 @@
 # at build time and not enumerated here — see build.sh.
 #
 # Tags pinned conservatively; refresh every ~6 months.
-# `TBD` tags need picking — see open questions at end of file.
 
 # =========================================================================
 # Architecture: dual-track ELF and Mach-O coexist
@@ -43,9 +44,9 @@
 #     ELF binaries link /lib/x86_64-linux-gnu/libc.so.6
 #
 #   Mach-O / libsystem-port track:
-#     Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder, launchd)
 #     Darling runtime (dyld, libsystem-port, mach-o-binfmt module, darlingserver,
 #       libpthread, libplatform, libdispatch, security-shim)
+#     Apple OSS userland (cctools, network_cmds, file_cmds, mDNSResponder, launchd)
 #     User-installed: brew bottles, MacPorts ports, third-party .app bundles
 #     Mach-O binaries link /usr/lib/libSystem.B.dylib
 #
@@ -95,122 +96,29 @@
 sources:
 
   # =========================================================================
-  # PHASE 1 — Apple OSS standalone CLI tools
+  # PHASE 1 — Darling runtime layer (Mach-O on a Linux kernel)
   # =========================================================================
-  # Built against libSystem-port. Produce Mach-O binaries in the TuxSTEP rootfs.
+  # Prerequisite for everything else Mach-O below. Without these, no Mach-O
+  # binary on the system runs at all — including launchd-as-PID-1, the Apple
+  # OSS userland, and any brew/MacPorts bottle. Has to be in place before
+  # Phase 2 binaries can even build (they link against libsystem-port).
 
-  cctools:
-    repo: https://github.com/tpoechtrager/cctools-port.git
-    tag: '973.0.1'
-    relationship: consume_with_patches
-    install_to: /usr/bin/
-    binaries: [otool, lipo, install_name_tool]
-    builds_against: libsystem-port
+  mach-o-binfmt:
+    repo: https://github.com/darlinghq/darling.git
+    subdir: kernel-module
+    tag: v0.1.20260222
+    relationship: consume
+    install_to: kernel module loaded at boot
     notes: >
-      Mach-O binary toolchain. tpoechtrager's port is well-trodden on Linux —
-      the warm-up port for the build harness.
-
-      Only Mach-O-unique binaries install: otool, lipo, install_name_tool.
-      cctools-port also builds nm/strip/ar/ranlib variants; those names
-      conflict with GNU binutils (which the Linux toolchain depends on for
-      ELF), so we deliberately do not install them. If a developer ever
-      needs Apple's flavor for Mach-O inspection, they can be added later
-      under a x86_64-apple-darwin- prefix without touching the GNU defaults.
-
-  network_cmds:
-    repo: https://github.com/apple-oss-distributions/network_cmds.git
-    tag: network_cmds-621
-    relationship: consume_with_patches
-    install_to:
-      ifconfig: /usr/sbin/ifconfig
-      route:    /usr/sbin/route
-      arp:      /usr/sbin/arp
-      ndp:      /usr/sbin/ndp
-      netstat:  /usr/bin/netstat
-    only: [ifconfig, route, netstat, arp, ndp]
-    replaces: net-tools
-    builds_against: libsystem-port
-    notes: >
-      FreeBSD-flavored network UX. Replaces Devuan's net-tools (which provides
-      ifconfig/route/netstat/arp at the same paths) — drop net-tools from
-      packages.list and ship Apple's binaries instead. iproute2's `ip` and
-      `ss` stay reachable as Linux-native alternatives. ndp is BSD-only with
-      no Linux conflict.
-
-  file_cmds:
-    repo: https://github.com/apple-oss-distributions/file_cmds.git
-    tag: TBD                           # latest stable file_cmds-* tag
-    relationship: consume_with_patches
-    install_to: /usr/bin/
-    only: [xattr]
-    builds_against: libsystem-port
-    notes: >
-      Just xattr for macOS-script compat. coreutils handles cp/mv/rm/etc.,
-      so we explicitly do NOT pull the rest of file_cmds. No name conflict —
-      Devuan doesn't ship an xattr binary; attr's getfattr/setfattr stay
-      installed alongside as the Linux-native equivalent.
-
-  # =========================================================================
-  # PHASE 2 — launchd as PID 1, and launchd-managed daemons
-  # =========================================================================
-  # With the Darling runtime layer (Phase 3) in place, Mach IPC is functional
-  # via darlingserver — so Mach-using code paths in these daemons stay
-  # ENABLED. They talk to darlingserver instead of an Apple kernel.
-
-  launchd:
-    repo: https://github.com/apple-oss-distributions/launchd.git
-    tag: launchd-842.92.1
-    relationship: consume_with_patches
-    install_to:
-      launchd:   /System/Library/Tools/launchd
-      launchctl: /System/Library/Tools/launchctl
-    additional:
-      - /sbin/init -> /System/Library/Tools/launchd   # symlink for kernel PID 1
-    builds_against: libsystem-port
-    notes: >
-      Lives entirely in /System so the TuxSTEP system layer (init, frameworks,
-      apps) can be rebuilt and reinstalled from source as a unit. /sbin/init
-      is a symlink that satisfies the kernel's conventional PID 1 location —
-      everything that actually executes lives under /System.
-
-      Real Apple launchd. Mach-bootstrap subsystem stays enabled — it talks
-      to darlingserver for the underlying IPC. Job spawning, KeepAlive,
-      plist parsing, and socket activation are POSIX. The bootstrap server
-      is one of darlingserver's clients, so launchd-via-Mach-bootstrap and
-      launchd-via-POSIX-sockets coexist.
-
-  mDNSResponder:
-    repo: https://github.com/apple-oss-distributions/mDNSResponder.git
-    tag: TBD                           # latest stable mDNSResponder-* tag
-    relationship: consume_with_patches
-    install_to:
-      mDNSResponder: /System/Library/Tools/mDNSResponder
-      dns-sd:        /System/Library/Tools/dns-sd
-    only: [mDNSResponder, dns-sd]
-    replaces: avahi-daemon
-    builds_against: libsystem-port
-    notes: >
-      Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
-      tree — the IOKit-coupled mDNSMacOSX layer is skipped (we don't have
-      IOKit). Replaces avahi-daemon — drop avahi from packages.list.
-
-      Lives in /System alongside launchd because it's launchd-managed:
-      without launchd as PID 1 there's no supervisor to run it. Started via
-      /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
-
-  # =========================================================================
-  # PHASE 3 — Darling runtime layer (Mach-O on a Linux kernel)
-  # =========================================================================
-  # The components below are what lets Mach-O binaries run at all. Without
-  # them TuxSTEP is "Apple userland + GNUstep on Devuan." With them TuxSTEP
-  # can execute Mach-O bottles from brew / MacPorts (subject to framework
-  # coverage; see security-shim and the not_integrated list for what's NOT
-  # provided).
+      Linux kernel module registering Mach-O as an executable format. When
+      the kernel exec()'s a Mach-O binary, this module dispatches it through
+      /usr/lib/dyld instead of the ELF loader. Loaded by initramfs before
+      launchd starts.
 
   dyld:
     repo: https://github.com/darlinghq/darling.git
     subdir: src/external/dyld
-    tag: TBD                           # pin to specific Darling commit/tag
+    tag: v0.1.20260222
     relationship: consume_with_patches
     install_to: /usr/lib/dyld
     builds_against: libsystem-port
@@ -219,18 +127,6 @@ sources:
       framework search paths (TuxSTEP's /System/Library/Frameworks should
       resolve before any prefix paths brew/MacPorts install). Tracked as a
       submodule or pinned subtree clone; not yet a separate fork.
-
-  mach-o-binfmt:
-    repo: https://github.com/darlinghq/darling.git
-    subdir: kernel-module
-    tag: TBD
-    relationship: consume
-    install_to: kernel module loaded at boot
-    notes: >
-      Linux kernel module registering Mach-O as an executable format. When
-      the kernel exec()'s a Mach-O binary, this module dispatches it through
-      /usr/lib/dyld instead of the ELF loader. Loaded early in boot before
-      launchd starts.
 
   libsystem-port:
     repo: https://github.com/tuxstep/libsystem-port.git    # not yet created
@@ -275,7 +171,7 @@ sources:
   darlingserver:
     repo: https://github.com/darlinghq/darling.git
     subdir: src/external/darlingserver
-    tag: TBD
+    tag: v0.1.20260222
     relationship: consume_with_patches
     install_to: /System/Library/Tools/darlingserver
     launchd_plist: /System/Library/LaunchDaemons/com.tuxstep.darlingserver.plist
@@ -283,20 +179,20 @@ sources:
       Userspace Mach IPC daemon. Provides mach_msg, bootstrap_look_up,
       port-rights semantics, task_for_pid for Mach-O processes that ask.
       Started by launchd via plist. Bootstrap ordering is delicate — see
-      open question 4 below.
+      open question 3 below.
 
   libpthread:
     repo: https://github.com/apple-oss-distributions/libpthread.git
-    tag: TBD
+    tag: libpthread-539.100.4
     relationship: consume
     install_to: /usr/lib/system/libsystem_pthread.dylib
     notes: >
       Apple's libpthread (Darling vendors a pinned version). Wired through
-      libSystem-port. Mostly Linux-portable.
+      libsystem-port. Mostly Linux-portable.
 
   libplatform:
     repo: https://github.com/apple-oss-distributions/libplatform.git
-    tag: TBD
+    tag: libplatform-375.100.10
     relationship: consume
     install_to: /usr/lib/system/libsystem_platform.dylib
     notes: >
@@ -304,14 +200,16 @@ sources:
       Linux-portable.
 
   libdispatch:
-    repo: https://github.com/apple/swift-corelibs-libdispatch.git
-    tag: TBD
+    repo: https://github.com/apple-oss-distributions/libdispatch.git
+    tag: libdispatch-1542.100.32
     relationship: consume
     install_to: /usr/lib/system/libdispatch.dylib
     notes: >
-      Apple's open libdispatch (the swift-corelibs version, well-maintained
-      on Linux). Wired through libSystem-port. GCD's dispatch_async, queue
-      semantics, etc. work natively.
+      Apple's libdispatch from apple-oss-distributions (matches the rest of
+      our Apple OSS source pinning style — proper version tags rather than
+      the swift-corelibs-libdispatch development snapshots). Wired through
+      libsystem-port. GCD's dispatch_async, queue semantics, etc. work
+      natively.
 
   security-shim:
     repo: https://github.com/tuxstep/security-shim.git    # not yet created
@@ -332,6 +230,113 @@ sources:
       Apple's full Security.framework. Tools that genuinely need keychain
       or codesign features (xcrun, codesign(1), authd-talking utilities)
       stay broken — accepted scope cut.
+
+  # =========================================================================
+  # PHASE 2 — Apple OSS standalone CLI tools
+  # =========================================================================
+  # Mach-O binaries built against libsystem-port. Depend on Phase 1 to build
+  # AND to run. No supervisor needed — these are CLI tools invoked from any
+  # shell.
+
+  cctools:
+    repo: https://github.com/tpoechtrager/cctools-port.git
+    tag: cctools-877.8-ld64-253.9-1
+    relationship: consume_with_patches
+    install_to: /usr/bin/
+    binaries: [otool, lipo, install_name_tool]
+    builds_against: libsystem-port
+    notes: >
+      Mach-O binary toolchain. tpoechtrager's port is well-trodden on Linux —
+      the warm-up port for the build harness.
+
+      Only Mach-O-unique binaries install: otool, lipo, install_name_tool.
+      cctools-port also builds nm/strip/ar/ranlib variants; those names
+      conflict with GNU binutils (which the Linux toolchain depends on for
+      ELF), so we deliberately do not install them. If a developer ever
+      needs Apple's flavor for Mach-O inspection, they can be added later
+      under a x86_64-apple-darwin- prefix without touching the GNU defaults.
+
+  network_cmds:
+    repo: https://github.com/apple-oss-distributions/network_cmds.git
+    tag: network_cmds-741.100.2
+    relationship: consume_with_patches
+    install_to:
+      ifconfig: /usr/sbin/ifconfig
+      route:    /usr/sbin/route
+      arp:      /usr/sbin/arp
+      ndp:      /usr/sbin/ndp
+      netstat:  /usr/bin/netstat
+    only: [ifconfig, route, netstat, arp, ndp]
+    replaces: net-tools
+    builds_against: libsystem-port
+    notes: >
+      FreeBSD-flavored network UX. Replaces Devuan's net-tools (which provides
+      ifconfig/route/netstat/arp at the same paths) — drop net-tools from
+      packages.list and ship Apple's binaries instead. iproute2's `ip` and
+      `ss` stay reachable as Linux-native alternatives. ndp is BSD-only with
+      no Linux conflict.
+
+  file_cmds:
+    repo: https://github.com/apple-oss-distributions/file_cmds.git
+    tag: file_cmds-479
+    relationship: consume_with_patches
+    install_to: /usr/bin/
+    only: [xattr]
+    builds_against: libsystem-port
+    notes: >
+      Just xattr for macOS-script compat. coreutils handles cp/mv/rm/etc.,
+      so we explicitly do NOT pull the rest of file_cmds. No name conflict —
+      Devuan doesn't ship an xattr binary; attr's getfattr/setfattr stay
+      installed alongside as the Linux-native equivalent.
+
+  # =========================================================================
+  # PHASE 3 — launchd as PID 1 and launchd-managed daemons
+  # =========================================================================
+  # Also Mach-O against libsystem-port. launchd is a special case — it has
+  # to come up before darlingserver but expects darlingserver's Mach IPC to
+  # work for Mach-bootstrap. Darling has solved this with an inline bootstrap
+  # in launchd's startup; we inherit that.
+
+  launchd:
+    repo: https://github.com/apple-oss-distributions/launchd.git
+    tag: launchd-842.92.1
+    relationship: consume_with_patches
+    install_to:
+      launchd:   /System/Library/Tools/launchd
+      launchctl: /System/Library/Tools/launchctl
+    additional:
+      - /sbin/init -> /System/Library/Tools/launchd   # symlink for kernel PID 1
+    builds_against: libsystem-port
+    notes: >
+      Lives entirely in /System so the TuxSTEP system layer (init, frameworks,
+      apps) can be rebuilt and reinstalled from source as a unit. /sbin/init
+      is a symlink that satisfies the kernel's conventional PID 1 location —
+      everything that actually executes lives under /System.
+
+      Real Apple launchd. Mach-bootstrap subsystem stays enabled — it talks
+      to darlingserver for the underlying IPC. Job spawning, KeepAlive,
+      plist parsing, and socket activation are POSIX. The bootstrap server
+      is one of darlingserver's clients, so launchd-via-Mach-bootstrap and
+      launchd-via-POSIX-sockets coexist.
+
+  mDNSResponder:
+    repo: https://github.com/apple-oss-distributions/mDNSResponder.git
+    tag: mDNSResponder-2881.100.56.0.1
+    relationship: consume_with_patches
+    install_to:
+      mDNSResponder: /System/Library/Tools/mDNSResponder
+      dns-sd:        /System/Library/Tools/dns-sd
+    only: [mDNSResponder, dns-sd]
+    replaces: avahi-daemon
+    builds_against: libsystem-port
+    notes: >
+      Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
+      tree — the IOKit-coupled mDNSMacOSX layer is skipped (we don't have
+      IOKit). Replaces avahi-daemon — drop avahi from packages.list.
+
+      Lives in /System alongside launchd because it's launchd-managed:
+      without launchd as PID 1 there's no supervisor to run it. Started via
+      /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
 
 # =========================================================================
 # Explicitly NOT integrated
@@ -419,24 +424,20 @@ not_integrated:
 # =========================================================================
 # Open questions for review
 # =========================================================================
-# 1. Tags TBD: file_cmds, mDNSResponder, dyld (which Darling commit/tag),
-#    mach-o-binfmt, darlingserver, libpthread, libplatform, libdispatch.
-#    Pin all in one pass once we've done a Darling integration spike.
-#
-# 2. dyld scope: are framework-search-path patches enough, or does dyld-port
+# 1. dyld scope: are framework-search-path patches enough, or does dyld-port
 #    need a full fork into github.com/tuxstep/dyld-port? Decide after the
 #    first integration spike — patches in ci/patches/dyld/ until they cross
 #    the "this is unwieldy" threshold.
 #
-# 3. security-shim API surface: minimum is SSLCreateContext, SSLHandshake,
+# 2. security-shim API surface: minimum is SSLCreateContext, SSLHandshake,
 #    SSLRead/Write, SSLClose, SecTrustCreateWithCertificates, SecTrustEvaluate.
 #    What else is load-bearing for the brew bottles you actually want to run?
 #    Worth running otool -L on a target set of bottles and tallying the
 #    Security.framework symbols they import, then sizing the shim to that.
 #
-# 4. Bootstrap order: launchd-as-PID-1 needs darlingserver running for Mach
+# 3. Bootstrap order: launchd-as-PID-1 needs darlingserver running for Mach
 #    bootstrap, but darlingserver is itself started by launchd. Darling has
 #    a solution (small inline bootstrap in launchd's startup path); verify
 #    it works for our PID-1-is-launchd setup before this hits the ISO build.
 #
-# 5. Anything missing from this list that we'll regret not pinning early?
+# 4. Anything missing from this list that we'll regret not pinning early?
