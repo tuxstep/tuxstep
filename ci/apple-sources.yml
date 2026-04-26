@@ -70,22 +70,8 @@ sources:
       Devuan doesn't ship an xattr binary; attr's getfattr/setfattr stay
       installed alongside as the Linux-native equivalent.
 
-  mDNSResponder:
-    repo: https://github.com/apple-oss-distributions/mDNSResponder.git
-    tag: TBD                           # latest stable mDNSResponder-* tag
-    install_to:
-      mDNSResponder: /usr/sbin/mDNSResponder
-      dns-sd:        /usr/bin/dns-sd
-    only: [mDNSResponder, dns-sd]
-    replaces: avahi-daemon
-    notes: >
-      Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
-      tree (the Mach-coupled mDNSMacOSX layer is skipped). Replaces
-      avahi-daemon — drop avahi from packages.list. Started by launchd via
-      /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
-
   # =========================================================================
-  # PHASE 2 — Init replacement (the project's actual differentiator)
+  # PHASE 2 — Init replacement and launchd-managed daemons
   # =========================================================================
 
   launchd:
@@ -105,6 +91,24 @@ sources:
       Real Apple launchd. Mach-bootstrap subsystem is dead code on Linux —
       a TuxSTEP patch disables it. Job spawning, KeepAlive, plist parsing,
       and socket activation are all straight POSIX.
+
+  mDNSResponder:
+    repo: https://github.com/apple-oss-distributions/mDNSResponder.git
+    tag: TBD                           # latest stable mDNSResponder-* tag
+    install_to:
+      mDNSResponder: /System/Library/Tools/mDNSResponder
+      dns-sd:        /System/Library/Tools/dns-sd
+    only: [mDNSResponder, dns-sd]
+    replaces: avahi-daemon
+    notes: >
+      Apple's Bonjour/mDNS daemon. Builds against the mDNSCore + mDNSPosix
+      tree (the Mach-coupled mDNSMacOSX layer is skipped). Replaces
+      avahi-daemon — drop avahi from packages.list.
+
+      Lives in /System alongside launchd because it's a launchd-managed
+      service: without launchd as PID 1 there's no supervisor to run it,
+      so it ships in Phase 2, not Phase 1. Started by launchd via
+      /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist.
 
 # =========================================================================
 # Explicitly NOT integrated
